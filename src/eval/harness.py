@@ -149,3 +149,143 @@ class EvalHarness:
             total += p.numel()
             zeros += (p == 0).sum().item()
         return zeros / total if total > 0 else 0.0
+
+    # ------------------------------------------------------------------
+    # Classification accuracy
+    # ------------------------------------------------------------------
+
+    def accuracy(self, dataloader) -> float:
+        """Compute classification accuracy over a DataLoader.
+
+        Each batch must contain ``input_ids``, ``attention_mask``, and
+        ``labels`` (integer class indices).  Prediction is the ``argmax``
+        of the last-token logits (causal LM convention for classification).
+
+        Args:
+            dataloader: Iterable of dicts with ``input_ids`` / ``labels``.
+
+        Returns:
+            Accuracy in ``[0, 1]``.
+        """
+        correct = total = 0
+        with torch.no_grad():
+            for batch in dataloader:
+                input_ids = batch["input_ids"].to(self.device)
+                labels = batch["labels"].to(self.device)
+                attention_mask = batch.get("attention_mask")
+                if attention_mask is not None:
+                    attention_mask = attention_mask.to(self.device)
+
+                outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                # Logits: (batch, seq, vocab) — use last non-pad token.
+                logits = outputs.logits[:, -1, :]  # (batch, vocab)
+                preds = logits.argmax(dim=-1)
+                correct += (preds == labels).sum().item()
+                total += labels.numel()
+
+        return correct / total if total > 0 else 0.0
+
+    def eval_sst2(self, n_samples: int = 200) -> dict[str, float]:
+        """Zero-shot SST-2 sentiment accuracy via log-likelihood scoring.
+
+        For each sentence, we score two continuations — " positive" and
+        " negative" — appended to the sentence, and predict the higher one.
+        This is the standard zero-shot causal-LM classification approach.
+
+        Args:
+            n_samples: Maximum number of validation examples to evaluate.
+
+        Returns:
+            ``{"sst2_accuracy": float}``
+        """
+        logger.info("Loading SST-2 validation split (n=%d)", n_samples)
+        ds = load_dataset("sst2", split="validation")
+        examples = list(ds)[:n_samples]
+
+        label_words = [" negative", " positive"]  # SST-2: 0=neg, 1=pos
+
+        correct = 0
+        with torch.no_grad():
+            for ex in examples:
+                sentence: str = ex["sentence"]
+                gold: int = int(ex["label"])
+
+                log_likelihoods: list[float] = []
+                for lw in label_words:
+                    full_text = sentence + lw
+                    enc = self.tokenizer(
+                        full_text,
+                        return_tensors="pt",
+                        truncation=True,
+                        max_length=self.max_length,
+                    )
+                    input_ids = enc["input_ids"].to(self.device)
+                    # Score the entire sequence; target = shift by 1.
+                    outputs = self.model(input_ids=input_ids, labels=input_ids)
+                    # outputs.loss is mean NLL; scale by length for total NLL.
+                    n_tokens = input_ids.shape[1]
+                    log_likelihoods.append(-outputs.loss.item() * n_tokens)
+
+                pred = int(log_likelihoods[1] > log_likelihoods[0])  # pos > neg → 1
+                if pred == gold:
+                    correct += 1
+
+        acc = correct / len(examples) if examples else 0.0
+        logger.info("SST-2 accuracy: %.3f (%d/%d)", acc, correct, len(examples))
+        return {"sst2_accuracy": acc}
+
+    # ------------------------------------------------------------------
+    # Unified evaluate()
+    # ------------------------------------------------------------------
+
+    def evaluate(
+        self,
+        tasks: list[str] | None = None,
+        n_samples: int = 200,
+        wikitext_split: str = "test",
+        log_to_wandb: bool = True,
+    ) -> dict[str, float]:
+        """Run a suite of evaluation tasks and return a metrics dict.
+
+        Supported task names:
+
+        * ``"wikitext"`` — WikiText-2 perplexity
+        * ``"sst2"``    — Zero-shot SST-2 accuracy
+
+        Args:
+            tasks: List of task names to run.  Defaults to ``["wikitext"]``.
+            n_samples: Number of samples per task.
+            wikitext_split: Dataset split for WikiText (``"test"`` by default).
+            log_to_wandb: If ``True`` and a wandb run is active, log results.
+
+        Returns:
+            Dict ``{metric_name: value}``.
+        """
+        if tasks is None:
+            tasks = ["wikitext"]
+
+        results: dict[str, float] = {}
+
+        for task in tasks:
+            if task == "wikitext":
+                result = self.eval_wikitext(split=wikitext_split, n_samples=n_samples)
+                results["perplexity"] = result.perplexity
+                results["loss"] = result.loss
+            elif task == "sst2":
+                results.update(self.eval_sst2(n_samples=n_samples))
+            else:
+                logger.warning("Unknown task '%s'; skipping.", task)
+
+        results["sparsity"] = self.sparsity()
+
+        if log_to_wandb:
+            try:
+                import wandb
+
+                if wandb.run is not None:
+                    wandb.log(results)
+                    logger.info("Results logged to wandb.")
+            except ImportError:
+                pass
+
+        return results
