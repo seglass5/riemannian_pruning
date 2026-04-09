@@ -41,6 +41,9 @@ include = ["src*", "experiments*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+markers = [
+    "integration: tests that require network access or large model downloads",
+]
 
 [tool.ruff]
 line-length = 100
