@@ -1,5 +1,19 @@
-"""Ricci curvature estimation modules."""
+"""Ricci curvature estimation for transformer attention graphs."""
 
-from src.curvature.ricci import OllivierRicci, curvature_matrix
+from src.curvature.aggregator import CurvatureProfile, HeadStats, LayerCurvatureAggregator, LayerStats
+from src.curvature.graph import AttentionGraphBuilder
+from src.curvature.ricci import OllivierRicci, OllivierRicciEstimator
 
-__all__ = ["OllivierRicci", "curvature_matrix"]
+__all__ = [
+    # graph
+    "AttentionGraphBuilder",
+    # estimator
+    "OllivierRicciEstimator",
+    # hook-based wrapper (used by GeometryPruner)
+    "OllivierRicci",
+    # aggregation
+    "LayerCurvatureAggregator",
+    "CurvatureProfile",
+    "HeadStats",
+    "LayerStats",
+]
