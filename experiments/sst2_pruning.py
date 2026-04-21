@@ -1,12 +1,12 @@
-"""SST-2 classification accuracy vs sparsity experiment.
+"""GLUE classification accuracy vs sparsity experiment (SST-2 and RTE).
 
 Pipeline
 --------
-1. Fine-tune GPT-2 (sequence classification head) on SST-2 train split.
+1. Fine-tune GPT-2 (sequence classification head) on the chosen task's train split.
 2. Establish baseline accuracy on validation.
 3. Pre-compute head importance scores:
    - MagnitudePruner  — L2 norm of Q/K/V weight slices.
-   - ActivationPruner — mean |V activation| over SST-2 calibration examples.
+   - ActivationPruner — mean |V activation| over calibration examples.
    - RicciPruner      — |Δκ̄| from task-conditioned curvature (gradient-modulated
                         attention graphs using the classification cross-entropy loss).
 4. Sweep sparsity [0%, 10%, 20%, 30%, 40%, 50%]:
@@ -15,9 +15,9 @@ Pipeline
 
 Usage::
 
-    python experiments/sst2_pruning.py
-    python experiments/sst2_pruning.py --max-train-steps 200 --n-eval 200 \\
-        --output sst2_results.png
+    python experiments/sst2_pruning.py --task sst2
+    python experiments/sst2_pruning.py --task rte
+    python experiments/sst2_pruning.py --task both --output comparison.png
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("sst2_pruning")
+logger = logging.getLogger("glue_pruning")
 
 SPARSITIES: list[float] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
 PRUNER_NAMES: list[str] = ["magnitude", "activation", "ricci"]
@@ -119,6 +119,87 @@ def _build_sst2_loaders(
         len(train_examples), len(calib_examples), len(eval_examples),
     )
     return train_loader, calib_loader, eval_loader
+
+
+def _build_rte_loaders(
+    tokenizer,
+    n_train: int = 500,
+    n_calib: int = 80,
+    n_eval: int = 200,
+    max_length: int = 64,
+    batch_size: int = 8,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """Return (train_loader, calib_loader, eval_loader) for RTE.
+
+    RTE (Recognising Textual Entailment) is a GLUE sentence-pair task:
+    given a premise and hypothesis, predict entailment (0) or not (1).
+    The two sentences are concatenated with a newline separator.
+    """
+    logger.info("Loading RTE …")
+    train_ds = load_dataset("glue", "rte", split="train")
+    val_ds = load_dataset("glue", "rte", split="validation")
+
+    def _text(example: dict) -> str:
+        return example["sentence1"] + "\n" + example["sentence2"]
+
+    def _encode(texts: list[str]):
+        return tokenizer(
+            texts,
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+
+    train_examples = list(train_ds)[:n_train]
+    train_enc = _encode([_text(e) for e in train_examples])
+    train_labels = [e["label"] for e in train_examples]
+    train_loader = DataLoader(
+        SST2Dataset(train_enc, train_labels), batch_size=batch_size, shuffle=True
+    )
+
+    calib_examples = list(train_ds)[n_train: n_train + n_calib]
+    calib_enc = _encode([_text(e) for e in calib_examples])
+    calib_labels = [e["label"] for e in calib_examples]
+    calib_loader = DataLoader(
+        SST2Dataset(calib_enc, calib_labels), batch_size=batch_size, shuffle=False
+    )
+
+    eval_examples = list(val_ds)[:n_eval]
+    eval_enc = _encode([_text(e) for e in eval_examples])
+    eval_labels = [e["label"] for e in eval_examples]
+    eval_loader = DataLoader(
+        SST2Dataset(eval_enc, eval_labels), batch_size=batch_size, shuffle=False
+    )
+
+    logger.info(
+        "RTE splits: train=%d  calib=%d  eval=%d",
+        len(train_examples), len(calib_examples), len(eval_examples),
+    )
+    return train_loader, calib_loader, eval_loader
+
+
+def _build_loaders_for_task(
+    task: str,
+    tokenizer,
+    n_train: int,
+    n_calib: int,
+    n_eval: int,
+    batch_size: int = 8,
+    max_length: int = 64,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    if task == "sst2":
+        return _build_sst2_loaders(
+            tokenizer, n_train=n_train, n_calib=n_calib, n_eval=n_eval,
+            max_length=max_length, batch_size=batch_size,
+        )
+    elif task == "rte":
+        return _build_rte_loaders(
+            tokenizer, n_train=n_train, n_calib=n_calib, n_eval=n_eval,
+            max_length=max_length, batch_size=batch_size,
+        )
+    else:
+        raise ValueError(f"Unknown task {task!r}. Choose 'sst2' or 'rte'.")
 
 
 # ---------------------------------------------------------------------------
@@ -209,11 +290,11 @@ def _prescore_activation(model, calib_loader, device):
     return pruner.score_heads(model, dataloader=list(calib_loader))
 
 
-def _prescore_ricci(model, calib_loader, device, n_batches, max_seq_len):
+def _prescore_ricci(model, calib_loader, device, n_batches, max_seq_len, task_name: str = ""):
     pruner = RicciPruner(
         n_batches=n_batches,
         max_seq_len=max_seq_len,
-        task_name="sst2",
+        task_name=task_name,
     )
     return pruner.score_heads(model, dataloader=list(calib_loader))
 
@@ -239,25 +320,36 @@ def _apply_scores(model, scores: dict, sparsity: float) -> None:
 
 
 def run_sweep(
+    task: str = "sst2",
     max_train_steps: int = 100,
-    n_train: int = 1000,
+    n_train: int | None = None,
     n_calib: int = 80,
     n_eval: int = 200,
     n_ricci_batches: int = 10,
     max_seq_len: int = 64,
-    output: str = "sst2_results.png",
+    output: str | None = None,
     device: str | None = None,
 ) -> dict[str, dict[float, float]]:
     """Full fine-tune → pre-score → sweep → evaluate pipeline.
 
     Returns nested dict ``pruner_name → sparsity → accuracy``.
+
+    Args:
+        task: GLUE task name — ``"sst2"`` or ``"rte"``.
+        n_train: Training examples.  Defaults to 1000 for SST-2, 500 for RTE.
+        output: Output figure path.  Defaults to ``"<task>_results.png"``.
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    if n_train is None:
+        n_train = 500 if task == "rte" else 1000
+    if output is None:
+        output = f"{task}_results.png"
 
     model, tokenizer = _load_gpt2_classifier(device)
 
-    train_loader, calib_loader, eval_loader = _build_sst2_loaders(
+    train_loader, calib_loader, eval_loader = _build_loaders_for_task(
+        task,
         tokenizer,
         n_train=n_train,
         n_calib=n_calib,
@@ -283,6 +375,7 @@ def run_sweep(
         model, calib_loader, device,
         n_batches=n_ricci_batches,
         max_seq_len=max_seq_len,
+        task_name=task,
     )
 
     all_scores = {
@@ -308,7 +401,7 @@ def run_sweep(
             results[pruner_name][sparsity] = acc
             logger.info("  → accuracy = %.3f", acc)
 
-    _plot_results(results, baseline_acc, output)
+    _plot_results(results, baseline_acc, output, task=task)
     return results
 
 
@@ -316,6 +409,7 @@ def _plot_results(
     results: dict[str, dict[float, float]],
     baseline_acc: float,
     output: str,
+    task: str = "sst2",
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -342,10 +436,10 @@ def _plot_results(
     ax.axhline(baseline_acc, color="grey", linestyle=":", linewidth=1.2,
                label=f"Baseline ({baseline_acc:.3f})")
     ax.set_xlabel("Head sparsity (%)", fontsize=12)
-    ax.set_ylabel("SST-2 accuracy", fontsize=12)
+    ax.set_ylabel(f"{task.upper()} accuracy", fontsize=12)
     ax.set_title(
-        "Classification accuracy vs head sparsity\n"
-        "GPT-2 fine-tuned on SST-2 — Magnitude / Activation / Ricci (task-conditioned)",
+        f"Classification accuracy vs head sparsity\n"
+        f"GPT-2 fine-tuned on {task.upper()} — Magnitude / Activation / Ricci (task-conditioned)",
         fontsize=11,
     )
     ax.legend(fontsize=11)
@@ -358,17 +452,93 @@ def _plot_results(
     plt.close(fig)
 
 
+def _plot_comparison(
+    results_by_task: dict[str, dict[str, dict[float, float]]],
+    baselines: dict[str, float],
+    output: str,
+) -> None:
+    """Side-by-side accuracy vs sparsity for two tasks, Ricci highlighted."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        logger.warning("matplotlib not installed — skipping plot.")
+        return
+
+    tasks = list(results_by_task)
+    fig, axes = plt.subplots(1, len(tasks), figsize=(7 * len(tasks), 5), sharey=False)
+    if len(tasks) == 1:
+        axes = [axes]
+
+    markers = {"magnitude": "o", "activation": "s", "ricci": "^"}
+    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c"}
+
+    for ax, task in zip(axes, tasks):
+        results = results_by_task[task]
+        baseline_acc = baselines[task]
+
+        for name, acc_by_sparsity in results.items():
+            xs = [s * 100 for s in sorted(acc_by_sparsity)]
+            ys = [acc_by_sparsity[s] for s in sorted(acc_by_sparsity)]
+            lw = 2.5 if name == "ricci" else 1.8
+            ax.plot(
+                xs, ys,
+                label=name.capitalize(),
+                marker=markers[name],
+                color=colors[name],
+                linewidth=lw,
+                markersize=7,
+            )
+
+        ax.axhline(baseline_acc, color="grey", linestyle=":", linewidth=1.2,
+                   label=f"Baseline ({baseline_acc:.3f})")
+        ax.set_xlabel("Head sparsity (%)", fontsize=12)
+        ax.set_ylabel(f"{task.upper()} accuracy", fontsize=12)
+        ax.set_title(
+            f"{task.upper()} — Magnitude / Activation / Ricci",
+            fontsize=11,
+        )
+        ax.legend(fontsize=10)
+        ax.grid(True, linestyle="--", alpha=0.5)
+
+    fig.suptitle(
+        "Classification accuracy vs head sparsity\n"
+        "GPT-2 fine-tuned independently on each task (task-conditioned Ricci curvature)",
+        fontsize=11,
+    )
+    fig.tight_layout()
+
+    out_path = Path(output)
+    fig.savefig(out_path, dpi=150)
+    logger.info("Comparison figure saved to %s", out_path.resolve())
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 
+def _print_table(task: str, results: dict[str, dict[float, float]]) -> None:
+    header = f"{'Sparsity':>10}" + "".join(f"  {n.capitalize():>12}" for n in PRUNER_NAMES)
+    sep = "=" * len(header)
+    print(f"\n{task.upper()}\n{sep}\n{header}\n{sep}")
+    for sparsity in SPARSITIES:
+        row = f"{sparsity * 100:>9.0f}%"
+        for name in PRUNER_NAMES:
+            acc = results[name].get(sparsity, float("nan"))
+            row += f"  {acc:>12.3f}"
+        print(row)
+    print(sep)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SST-2 pruning sweep")
+    parser = argparse.ArgumentParser(description="GLUE pruning sweep (SST-2 / RTE)")
+    parser.add_argument("--task", default="sst2", choices=["sst2", "rte", "both"],
+                        help="Task to run: sst2, rte, or both (default: sst2)")
     parser.add_argument("--max-train-steps", type=int, default=100,
-                        help="Fine-tuning steps (default 100, ~3 min on CPU)")
-    parser.add_argument("--n-train", type=int, default=1000,
-                        help="SST-2 training examples used")
+                        help="Fine-tuning steps per task (default 100)")
+    parser.add_argument("--n-train", type=int, default=None,
+                        help="Training examples (default: 1000 for SST-2, 500 for RTE)")
     parser.add_argument("--n-calib", type=int, default=80,
                         help="Calibration examples for Activation/Ricci scorers")
     parser.add_argument("--n-eval", type=int, default=200,
@@ -377,33 +547,40 @@ def main() -> None:
                         help="Gradient batches for RicciPruner (batch_size=8)")
     parser.add_argument("--max-seq-len", type=int, default=64,
                         help="Sequence truncation for OT computation")
-    parser.add_argument("--output", default="sst2_results.png",
-                        help="Output figure path")
+    parser.add_argument("--output", default=None,
+                        help="Output figure path (default: <task>_results.png or comparison.png)")
     parser.add_argument("--device", default=None, help="Device (cpu/cuda)")
     args = parser.parse_args()
 
-    results = run_sweep(
+    sweep_kwargs = dict(
         max_train_steps=args.max_train_steps,
         n_train=args.n_train,
         n_calib=args.n_calib,
         n_eval=args.n_eval,
         n_ricci_batches=args.n_ricci_batches,
         max_seq_len=args.max_seq_len,
-        output=args.output,
         device=args.device,
     )
 
-    # Summary table
-    header = f"{'Sparsity':>10}" + "".join(f"  {n.capitalize():>12}" for n in PRUNER_NAMES)
-    sep = "=" * len(header)
-    print(f"\n{sep}\n{header}\n{sep}")
-    for sparsity in SPARSITIES:
-        row = f"{sparsity * 100:>9.0f}%"
-        for name in PRUNER_NAMES:
-            acc = results[name].get(sparsity, float("nan"))
-            row += f"  {acc:>12.3f}"
-        print(row)
-    print(sep)
+    if args.task == "both":
+        results_by_task: dict[str, dict[str, dict[float, float]]] = {}
+        baselines: dict[str, float] = {}
+
+        for task in ("sst2", "rte"):
+            logger.info("======  Task: %s  ======", task.upper())
+            # Run sweep without saving individual plots; we'll make one combined figure.
+            results = run_sweep(task=task, output=f"{task}_results.png", **sweep_kwargs)
+            results_by_task[task] = results
+            # Baseline is the sparsity=0 accuracy (same across all pruners).
+            baselines[task] = results["magnitude"][0.0]
+            _print_table(task, results)
+
+        out = args.output or "comparison.png"
+        _plot_comparison(results_by_task, baselines, out)
+
+    else:
+        results = run_sweep(task=args.task, output=args.output, **sweep_kwargs)
+        _print_table(args.task, results)
 
 
 if __name__ == "__main__":
