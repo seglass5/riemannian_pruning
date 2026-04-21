@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from src.curvature.task import TaskCurvatureProfile
 
 import torch
 import torch.nn as nn
@@ -177,25 +180,76 @@ class ActivationPruner(HeadPruner):
 
 
 class RicciPruner(HeadPruner):
-    """Score heads by Ollivier–Ricci curvature (stub implementation).
+    """Score heads by task-conditioned Ollivier–Ricci curvature delta.
 
-    .. note::
-        This is a placeholder that **falls back to** :class:`MagnitudePruner`
-        scoring.  A full implementation would use
-        :class:`~src.models.inspector.TransformerInspector` to capture
-        attention weights and
-        :class:`~src.curvature.ricci.OllivierRicciEstimator` to compute
-        per-head curvature scores.  Lower curvature ⟹ bottleneck head ⟹
-        pruned first.
+    Uses ``|Δκ̄| = |task_mean_κ − base_mean_κ|`` per head as the importance
+    score.  Heads with small ``|Δκ̄|`` are insensitive to the task signal and
+    are pruned first; heads with large ``|Δκ̄|`` are preserved.
+
+    Requires a ``dataloader`` that yields batches with ``"input_ids"`` (and
+    optionally ``"labels"`` for classification tasks).  Falls back to
+    :class:`MagnitudePruner` scoring when no dataloader is provided.
+
+    Args:
+        n_batches: Calibration batches for gradient estimation (default 10).
+        max_seq_len: Sequence truncation for OT — strongly recommended
+            (OT is O(S²) per head; 32–64 is practical on CPU).
+        modulation: Edge-weight modulation strategy passed to
+            :class:`~src.curvature.task.TaskConditionedCurvatureEstimator`.
+        task_name: Label stored in the task curvature profile.
+        loss_fn: Optional ``(model_output, batch_dict) -> scalar`` callable.
+            If ``None``, the model's NLL is used (suitable for causal LMs).
+            For sequence classifiers, pass a function that reads
+            ``output.loss``.
     """
+
+    def __init__(
+        self,
+        n_batches: int = 10,
+        max_seq_len: int = 32,
+        modulation: str = "multiplicative",
+        task_name: str = "",
+        loss_fn: Optional[Callable] = None,
+    ) -> None:
+        super().__init__()
+        self.n_batches = n_batches
+        self.max_seq_len = max_seq_len
+        self.modulation = modulation
+        self.task_name = task_name
+        self.loss_fn = loss_fn
+        self._task_profile: Optional["TaskCurvatureProfile"] = None
 
     def score_heads(
         self,
         model: nn.Module,
         dataloader=None,
     ) -> dict[tuple[int, int], float]:
-        logger.warning(
-            "RicciPruner.score_heads is a stub; falling back to MagnitudePruner. "
-            "Replace with curvature-based scoring once curvature estimation is validated."
+        if dataloader is None:
+            logger.warning(
+                "RicciPruner: no dataloader — falling back to MagnitudePruner. "
+                "Pass a task-specific DataLoader for geometry-informed scoring."
+            )
+            return MagnitudePruner().score_heads(model)
+
+        from src.curvature.task import TaskConditionedCurvatureEstimator
+
+        est = TaskConditionedCurvatureEstimator(
+            model=model,
+            dataloader=dataloader,
+            loss_fn=self.loss_fn,
+            n_batches=self.n_batches,
+            max_seq_len=self.max_seq_len,
+            modulation=self.modulation,
+            task_name=self.task_name,
         )
-        return MagnitudePruner().score_heads(model, dataloader)
+
+        profile = est.compute_task_profile()
+        self._task_profile = profile
+        logger.info("RicciPruner task profile:\n%s", profile.summary())
+
+        # Score = |Δκ̄|.  Higher → more task-sensitive → pruned last.
+        return {
+            (layer_idx, head_idx): abs(delta)
+            for layer_idx, heads in profile.delta.items()
+            for head_idx, delta in heads.items()
+        }

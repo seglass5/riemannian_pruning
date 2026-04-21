@@ -3,6 +3,7 @@
 from src.curvature.aggregator import CurvatureProfile, HeadStats, LayerCurvatureAggregator, LayerStats
 from src.curvature.graph import AttentionGraphBuilder
 from src.curvature.ricci import OllivierRicci, OllivierRicciEstimator
+from src.curvature.task import TaskConditionedCurvatureEstimator, TaskCurvatureProfile
 
 __all__ = [
     # graph
@@ -16,4 +17,7 @@ __all__ = [
     "CurvatureProfile",
     "HeadStats",
     "LayerStats",
+    # task-conditioned curvature
+    "TaskConditionedCurvatureEstimator",
+    "TaskCurvatureProfile",
 ]
