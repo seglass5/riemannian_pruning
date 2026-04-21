@@ -107,11 +107,19 @@ class EvalHarness:
                     chunk = input_ids[:, begin:end]
                     target_len = end - max(begin, self.max_length - stride)
 
+                    # Short texts where the full sequence fits inside one
+                    # context window have target_len <= 0 under the overlap
+                    # formula.  Score all tokens in the chunk instead.
+                    if target_len <= 0:
+                        target_len = end - begin
+
                     labels = chunk.clone()
                     labels[:, :-target_len] = -100
 
                     outputs = self.model(input_ids=chunk, labels=labels)
                     loss = outputs.loss
+                    if torch.isnan(loss):
+                        continue
                     total_loss += loss.item() * target_len
                     total_tokens += target_len
 
