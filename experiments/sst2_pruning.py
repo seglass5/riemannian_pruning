@@ -388,6 +388,7 @@ def run_sweep(
     max_seq_len: int = 64,
     output: str | None = None,
     device: str | None = None,
+    seed: int = 42,
 ) -> dict[str, dict[float, float]]:
     """Full fine-tune → pre-score → sweep → evaluate pipeline.
 
@@ -397,7 +398,10 @@ def run_sweep(
         task: GLUE task name — ``"sst2"``, ``"rte"``, or ``"cola"``.
         n_train: Training examples.  Defaults to 1000 for SST-2/CoLA, 2000 for RTE.
         output: Output figure path.  Defaults to ``"<task>_results.png"``.
+        seed: Random seed for fine-tuning and data shuffling reproducibility.
     """
+    torch.manual_seed(seed)
+
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if n_train is None:
@@ -464,6 +468,37 @@ def run_sweep(
     return results
 
 
+def run_multi_seed(
+    n_seeds: int = 3,
+    base_seed: int = 42,
+    task: str = "sst2",
+    output: str | None = None,
+    **sweep_kwargs,
+) -> dict[str, dict[float, list[float]]]:
+    """Run the full sweep for *n_seeds* seeds and aggregate results.
+
+    Seeds used are ``base_seed, base_seed+1, …, base_seed+n_seeds-1``.
+
+    Returns nested dict ``pruner_name → sparsity → [accuracy per seed]``.
+    """
+    accum: dict[str, dict[float, list[float]]] = {
+        name: {s: [] for s in SPARSITIES} for name in PRUNER_NAMES
+    }
+
+    for i in range(n_seeds):
+        seed = base_seed + i
+        logger.info("======  Seed %d/%d  (seed=%d)  ======", i + 1, n_seeds, seed)
+        results = run_sweep(task=task, seed=seed, output=None, **sweep_kwargs)
+        for name in PRUNER_NAMES:
+            for sparsity in SPARSITIES:
+                accum[name][sparsity].append(results[name][sparsity])
+
+    if output is None:
+        output = f"{task}_multiseed.png"
+    _plot_results_multi_seed(accum, output, task=task, n_seeds=n_seeds)
+    return accum
+
+
 def _plot_results(
     results: dict[str, dict[float, float]],
     baseline_acc: float,
@@ -508,6 +543,58 @@ def _plot_results(
     out_path = Path(output)
     fig.savefig(out_path, dpi=150)
     logger.info("Figure saved to %s", out_path.resolve())
+    plt.close(fig)
+
+
+def _plot_results_multi_seed(
+    accum: dict[str, dict[float, list[float]]],
+    output: str,
+    task: str = "sst2",
+    n_seeds: int = 3,
+) -> None:
+    """Plot mean ± 1 std accuracy vs sparsity across seeds."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        logger.warning("matplotlib not installed — skipping plot.")
+        return
+
+    import statistics
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    markers = {"magnitude": "o", "activation": "s", "ricci": "^"}
+    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c"}
+
+    for name, acc_by_sparsity in accum.items():
+        xs = [s * 100 for s in sorted(acc_by_sparsity)]
+        means = [statistics.mean(acc_by_sparsity[s]) for s in sorted(acc_by_sparsity)]
+        stds = [
+            statistics.stdev(acc_by_sparsity[s]) if len(acc_by_sparsity[s]) > 1 else 0.0
+            for s in sorted(acc_by_sparsity)
+        ]
+        ax.plot(xs, means, label=name.capitalize(), marker=markers[name],
+                color=colors[name], linewidth=2, markersize=7)
+        ax.fill_between(
+            xs,
+            [m - s for m, s in zip(means, stds)],
+            [m + s for m, s in zip(means, stds)],
+            color=colors[name], alpha=0.18,
+        )
+
+    ax.set_xlabel("Head sparsity (%)", fontsize=12)
+    ax.set_ylabel(f"{task.upper()} accuracy", fontsize=12)
+    ax.set_title(
+        f"Classification accuracy vs head sparsity (mean ± 1 std, n={n_seeds} seeds)\n"
+        f"GPT-2 fine-tuned on {task.upper()} — Magnitude / Activation / Ricci (task-conditioned)",
+        fontsize=11,
+    )
+    ax.legend(fontsize=11)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    fig.tight_layout()
+
+    out_path = Path(output)
+    fig.savefig(out_path, dpi=150)
+    logger.info("Multi-seed figure saved to %s", out_path.resolve())
     plt.close(fig)
 
 
@@ -590,10 +677,39 @@ def _print_table(task: str, results: dict[str, dict[float, float]]) -> None:
     print(sep)
 
 
+def _print_table_multi_seed(
+    task: str,
+    accum: dict[str, dict[float, list[float]]],
+) -> None:
+    import statistics
+    col_w = 18
+    header = f"{'Sparsity':>10}" + "".join(f"  {n.capitalize():>{col_w}}" for n in PRUNER_NAMES)
+    sep = "=" * len(header)
+    print(f"\n{task.upper()}  (mean ± std)\n{sep}\n{header}\n{sep}")
+    for sparsity in SPARSITIES:
+        row = f"{sparsity * 100:>9.0f}%"
+        for name in PRUNER_NAMES:
+            vals = accum[name].get(sparsity, [])
+            if not vals:
+                row += f"  {'nan':>{col_w}}"
+            elif len(vals) == 1:
+                row += f"  {vals[0]:>{col_w}.3f}"
+            else:
+                m = statistics.mean(vals)
+                s = statistics.stdev(vals)
+                row += f"  {f'{m:.3f} ±{s:.3f}':>{col_w}}"
+        print(row)
+    print(sep)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="GLUE pruning sweep (SST-2 / CoLA / RTE)")
     parser.add_argument("--task", default="sst2", choices=["sst2", "cola", "rte", "both"],
                         help="Task to run: sst2, cola, rte, or both (default: sst2; 'both' runs sst2+cola)")
+    parser.add_argument("--n-seeds", type=int, default=1,
+                        help="Number of random seeds to run and average over (default: 1)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Base random seed; multi-seed uses seed, seed+1, … (default: 42)")
     parser.add_argument("--max-train-steps", type=int, default=100,
                         help="Fine-tuning steps per task (default 100)")
     parser.add_argument("--n-train", type=int, default=None,
@@ -607,7 +723,7 @@ def main() -> None:
     parser.add_argument("--max-seq-len", type=int, default=64,
                         help="Sequence truncation for OT computation")
     parser.add_argument("--output", default=None,
-                        help="Output figure path (default: <task>_results.png or comparison.png)")
+                        help="Output figure path (default: <task>_results.png or <task>_multiseed.png)")
     parser.add_argument("--device", default=None, help="Device (cpu/cuda)")
     args = parser.parse_args()
 
@@ -627,18 +743,28 @@ def main() -> None:
 
         for task in ("sst2", "cola"):
             logger.info("======  Task: %s  ======", task.upper())
-            # Run sweep without saving individual plots; we'll make one combined figure.
-            results = run_sweep(task=task, output=f"{task}_results.png", **sweep_kwargs)
+            results = run_sweep(task=task, seed=args.seed,
+                                output=f"{task}_results.png", **sweep_kwargs)
             results_by_task[task] = results
-            # Baseline is the sparsity=0 accuracy (same across all pruners).
             baselines[task] = results["magnitude"][0.0]
             _print_table(task, results)
 
         out = args.output or "comparison.png"
         _plot_comparison(results_by_task, baselines, out)
 
+    elif args.n_seeds > 1:
+        accum = run_multi_seed(
+            n_seeds=args.n_seeds,
+            base_seed=args.seed,
+            task=args.task,
+            output=args.output,
+            **sweep_kwargs,
+        )
+        _print_table_multi_seed(args.task, accum)
+
     else:
-        results = run_sweep(task=args.task, output=args.output, **sweep_kwargs)
+        results = run_sweep(task=args.task, seed=args.seed,
+                            output=args.output, **sweep_kwargs)
         _print_table(args.task, results)
 
 
