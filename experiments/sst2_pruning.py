@@ -179,6 +179,60 @@ def _build_rte_loaders(
     return train_loader, calib_loader, eval_loader
 
 
+def _build_cola_loaders(
+    tokenizer,
+    n_train: int = 1000,
+    n_calib: int = 80,
+    n_eval: int = 200,
+    max_length: int = 64,
+    batch_size: int = 8,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """Return (train_loader, calib_loader, eval_loader) for CoLA.
+
+    CoLA (Corpus of Linguistic Acceptability) is a single-sentence GLUE task:
+    predict whether an English sentence is grammatically acceptable (1) or not (0).
+    """
+    logger.info("Loading CoLA …")
+    train_ds = load_dataset("glue", "cola", split="train")
+    val_ds = load_dataset("glue", "cola", split="validation")
+
+    def _encode(sentences: list[str]):
+        return tokenizer(
+            sentences,
+            padding="max_length",
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+
+    train_examples = list(train_ds)[:n_train]
+    train_enc = _encode([e["sentence"] for e in train_examples])
+    train_labels = [e["label"] for e in train_examples]
+    train_loader = DataLoader(
+        SST2Dataset(train_enc, train_labels), batch_size=batch_size, shuffle=True
+    )
+
+    calib_examples = list(train_ds)[n_train: n_train + n_calib]
+    calib_enc = _encode([e["sentence"] for e in calib_examples])
+    calib_labels = [e["label"] for e in calib_examples]
+    calib_loader = DataLoader(
+        SST2Dataset(calib_enc, calib_labels), batch_size=batch_size, shuffle=False
+    )
+
+    eval_examples = list(val_ds)[:n_eval]
+    eval_enc = _encode([e["sentence"] for e in eval_examples])
+    eval_labels = [e["label"] for e in eval_examples]
+    eval_loader = DataLoader(
+        SST2Dataset(eval_enc, eval_labels), batch_size=batch_size, shuffle=False
+    )
+
+    logger.info(
+        "CoLA splits: train=%d  calib=%d  eval=%d",
+        len(train_examples), len(calib_examples), len(eval_examples),
+    )
+    return train_loader, calib_loader, eval_loader
+
+
 def _build_loaders_for_task(
     task: str,
     tokenizer,
@@ -198,8 +252,13 @@ def _build_loaders_for_task(
             tokenizer, n_train=n_train, n_calib=n_calib, n_eval=n_eval,
             max_length=max_length, batch_size=batch_size,
         )
+    elif task == "cola":
+        return _build_cola_loaders(
+            tokenizer, n_train=n_train, n_calib=n_calib, n_eval=n_eval,
+            max_length=max_length, batch_size=batch_size,
+        )
     else:
-        raise ValueError(f"Unknown task {task!r}. Choose 'sst2' or 'rte'.")
+        raise ValueError(f"Unknown task {task!r}. Choose 'sst2', 'rte', or 'cola'.")
 
 
 # ---------------------------------------------------------------------------
@@ -335,8 +394,8 @@ def run_sweep(
     Returns nested dict ``pruner_name → sparsity → accuracy``.
 
     Args:
-        task: GLUE task name — ``"sst2"`` or ``"rte"``.
-        n_train: Training examples.  Defaults to 1000 for SST-2, 2000 for RTE.
+        task: GLUE task name — ``"sst2"``, ``"rte"``, or ``"cola"``.
+        n_train: Training examples.  Defaults to 1000 for SST-2/CoLA, 2000 for RTE.
         output: Output figure path.  Defaults to ``"<task>_results.png"``.
     """
     if device is None:
@@ -532,13 +591,13 @@ def _print_table(task: str, results: dict[str, dict[float, float]]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="GLUE pruning sweep (SST-2 / RTE)")
-    parser.add_argument("--task", default="sst2", choices=["sst2", "rte", "both"],
-                        help="Task to run: sst2, rte, or both (default: sst2)")
+    parser = argparse.ArgumentParser(description="GLUE pruning sweep (SST-2 / CoLA / RTE)")
+    parser.add_argument("--task", default="sst2", choices=["sst2", "cola", "rte", "both"],
+                        help="Task to run: sst2, cola, rte, or both (default: sst2; 'both' runs sst2+cola)")
     parser.add_argument("--max-train-steps", type=int, default=100,
                         help="Fine-tuning steps per task (default 100)")
     parser.add_argument("--n-train", type=int, default=None,
-                        help="Training examples (default: 1000 for SST-2, 500 for RTE)")
+                        help="Training examples (default: 1000 for SST-2/CoLA, 2000 for RTE)")
     parser.add_argument("--n-calib", type=int, default=80,
                         help="Calibration examples for Activation/Ricci scorers")
     parser.add_argument("--n-eval", type=int, default=200,
@@ -566,7 +625,7 @@ def main() -> None:
         results_by_task: dict[str, dict[str, dict[float, float]]] = {}
         baselines: dict[str, float] = {}
 
-        for task in ("sst2", "rte"):
+        for task in ("sst2", "cola"):
             logger.info("======  Task: %s  ======", task.upper())
             # Run sweep without saving individual plots; we'll make one combined figure.
             results = run_sweep(task=task, output=f"{task}_results.png", **sweep_kwargs)
