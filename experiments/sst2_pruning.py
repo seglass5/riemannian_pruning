@@ -336,13 +336,13 @@ def run_sweep(
 
     Args:
         task: GLUE task name — ``"sst2"`` or ``"rte"``.
-        n_train: Training examples.  Defaults to 1000 for SST-2, 500 for RTE.
+        n_train: Training examples.  Defaults to 1000 for SST-2, 2000 for RTE.
         output: Output figure path.  Defaults to ``"<task>_results.png"``.
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if n_train is None:
-        n_train = 500 if task == "rte" else 1000
+        n_train = 2000 if task == "rte" else 1000
     if output is None:
         output = f"{task}_results.png"
 
