@@ -35,7 +35,7 @@ from datasets import load_dataset
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 
-from src.pruning.head_pruners import ActivationPruner, MagnitudePruner, RicciPruner
+from src.pruning.head_pruners import ActivationPruner, MagnitudePruner, RandomPruner, RicciPruner
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,7 +45,7 @@ logging.basicConfig(
 logger = logging.getLogger("glue_pruning")
 
 SPARSITIES: list[float] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
-PRUNER_NAMES: list[str] = ["magnitude", "activation", "ricci"]
+PRUNER_NAMES: list[str] = ["magnitude", "activation", "ricci", "random"]
 
 
 # ---------------------------------------------------------------------------
@@ -393,8 +393,14 @@ def _jaccard(a: set, b: set) -> float:
 
 def _print_overlap_table(all_scores: dict) -> None:
     """Print Jaccard overlap between every pruner pair at each sparsity."""
-    pairs = [("magnitude", "activation"), ("magnitude", "ricci"), ("activation", "ricci")]
-    pair_labels = ["Mag–Act", "Mag–Ricci", "Act–Ricci"]
+    pairs = [
+        ("magnitude", "activation"),
+        ("magnitude", "ricci"),
+        ("activation", "ricci"),
+        ("magnitude", "random"),
+        ("ricci", "random"),
+    ]
+    pair_labels = ["Mag–Act", "Mag–Ricci", "Act–Ricci", "Mag–Rand", "Ricci–Rand"]
     col_w = 12
     header = f"{'Sparsity':>10}" + "".join(f"  {lbl:>{col_w}}" for lbl in pair_labels)
     sep = "=" * len(header)
@@ -482,10 +488,14 @@ def run_sweep(
         task_name=task,
     )
 
+    logger.info("RandomPruner …")
+    rand_scores = RandomPruner().score_heads(model)
+
     all_scores = {
         "magnitude": mag_scores,
         "activation": act_scores,
         "ricci": ricci_scores,
+        "random": rand_scores,
     }
 
     results: dict[str, dict[float, float]] = {name: {} for name in PRUNER_NAMES}
@@ -555,8 +565,9 @@ def _plot_results(
         return
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    markers = {"magnitude": "o", "activation": "s", "ricci": "^"}
-    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c"}
+    markers = {"magnitude": "o", "activation": "s", "ricci": "^", "random": "x"}
+    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c", "random": "#d62728"}
+    linestyles = {"magnitude": "-", "activation": "-", "ricci": "-", "random": "--"}
 
     for name, acc_by_sparsity in results.items():
         xs = [s * 100 for s in sorted(acc_by_sparsity)]
@@ -566,6 +577,7 @@ def _plot_results(
             label=name.capitalize(),
             marker=markers[name],
             color=colors[name],
+            linestyle=linestyles[name],
             linewidth=2,
             markersize=7,
         )
@@ -576,7 +588,7 @@ def _plot_results(
     ax.set_ylabel(f"{task.upper()} accuracy", fontsize=12)
     ax.set_title(
         f"Classification accuracy vs head sparsity\n"
-        f"GPT-2 fine-tuned on {task.upper()} — Magnitude / Activation / Ricci (task-conditioned)",
+        f"GPT-2 fine-tuned on {task.upper()} — Magnitude / Activation / Ricci / Random",
         fontsize=11,
     )
     ax.legend(fontsize=11)
@@ -605,8 +617,9 @@ def _plot_results_multi_seed(
     import statistics
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    markers = {"magnitude": "o", "activation": "s", "ricci": "^"}
-    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c"}
+    markers = {"magnitude": "o", "activation": "s", "ricci": "^", "random": "x"}
+    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c", "random": "#d62728"}
+    linestyles = {"magnitude": "-", "activation": "-", "ricci": "-", "random": "--"}
 
     for name, acc_by_sparsity in accum.items():
         xs = [s * 100 for s in sorted(acc_by_sparsity)]
@@ -616,7 +629,7 @@ def _plot_results_multi_seed(
             for s in sorted(acc_by_sparsity)
         ]
         ax.plot(xs, means, label=name.capitalize(), marker=markers[name],
-                color=colors[name], linewidth=2, markersize=7)
+                color=colors[name], linestyle=linestyles[name], linewidth=2, markersize=7)
         ax.fill_between(
             xs,
             [m - s for m, s in zip(means, stds)],
@@ -628,7 +641,7 @@ def _plot_results_multi_seed(
     ax.set_ylabel(f"{task.upper()} accuracy", fontsize=12)
     ax.set_title(
         f"Classification accuracy vs head sparsity (mean ± 1 std, n={n_seeds} seeds)\n"
-        f"GPT-2 fine-tuned on {task.upper()} — Magnitude / Activation / Ricci (task-conditioned)",
+        f"GPT-2 fine-tuned on {task.upper()} — Magnitude / Activation / Ricci / Random",
         fontsize=11,
     )
     ax.legend(fontsize=11)
@@ -658,8 +671,9 @@ def _plot_comparison(
     if len(tasks) == 1:
         axes = [axes]
 
-    markers = {"magnitude": "o", "activation": "s", "ricci": "^"}
-    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c"}
+    markers = {"magnitude": "o", "activation": "s", "ricci": "^", "random": "x"}
+    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c", "random": "#d62728"}
+    linestyles = {"magnitude": "-", "activation": "-", "ricci": "-", "random": "--"}
 
     for ax, task in zip(axes, tasks):
         results = results_by_task[task]
@@ -674,6 +688,7 @@ def _plot_comparison(
                 label=name.capitalize(),
                 marker=markers[name],
                 color=colors[name],
+                linestyle=linestyles[name],
                 linewidth=lw,
                 markersize=7,
             )
@@ -733,6 +748,7 @@ def _plot_overlap(
         "magnitude": "#1f77b4",
         "activation": "#ff7f0e",
         "ricci": "#2ca02c",
+        "random": "#d62728",
     }
 
     nonzero_s = [s for s in SPARSITIES if s > 0.0]

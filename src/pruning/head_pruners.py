@@ -253,3 +253,28 @@ class RicciPruner(HeadPruner):
             for layer_idx, heads in profile.delta.items()
             for head_idx, delta in heads.items()
         }
+
+
+class RandomPruner(HeadPruner):
+    """Score heads by uniform random values — a null-model pruning baseline.
+
+    Reproducibility is controlled by the caller via ``torch.manual_seed()``
+    before invoking :meth:`score_heads`.  The experiment scripts set the seed
+    at the start of each sweep, so random scores are consistent within a run
+    but vary across seeds.
+    """
+
+    def score_heads(
+        self,
+        model: nn.Module,
+        dataloader=None,
+    ) -> dict[tuple[int, int], float]:
+        from src.models.inspector import TransformerInspector
+
+        inspector = TransformerInspector(model)
+        num_heads, _ = self._head_config(model)
+        return {
+            (layer_info.idx, h): torch.rand(1).item()
+            for layer_info in inspector._layers
+            for h in range(num_heads)
+        }

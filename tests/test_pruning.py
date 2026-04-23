@@ -5,7 +5,7 @@ import torch.nn as nn
 import pytest
 
 from src.pruning.base import BasePruner, HeadPruner, PruningMask
-from src.pruning.head_pruners import ActivationPruner, MagnitudePruner, RicciPruner
+from src.pruning.head_pruners import ActivationPruner, MagnitudePruner, RandomPruner, RicciPruner
 from src.pruning.magnitude import HeadMagnitudePruner
 from src.pruning.magnitude import MagnitudePruner as UnstructuredMagnitudePruner
 
@@ -365,3 +365,38 @@ class TestRicciPruner:
         pruner = RicciPruner()
         mask = pruner.prune(model, sparsity=0.25)
         assert len(mask) > 0
+
+
+class TestRandomPruner:
+    def test_returns_correct_number_of_scores(self):
+        model = _tiny_gpt2()
+        scores = RandomPruner().score_heads(model)
+        ref = MagnitudePruner().score_heads(model)
+        assert set(scores.keys()) == set(ref.keys())
+
+    def test_scores_are_in_unit_interval(self):
+        model = _tiny_gpt2()
+        scores = RandomPruner().score_heads(model)
+        assert all(0.0 <= v <= 1.0 for v in scores.values())
+
+    def test_different_seeds_give_different_scores(self):
+        model = _tiny_gpt2()
+        torch.manual_seed(0)
+        scores_a = RandomPruner().score_heads(model)
+        torch.manual_seed(1)
+        scores_b = RandomPruner().score_heads(model)
+        assert scores_a != scores_b
+
+    def test_same_seed_gives_same_scores(self):
+        model = _tiny_gpt2()
+        torch.manual_seed(42)
+        scores_a = RandomPruner().score_heads(model)
+        torch.manual_seed(42)
+        scores_b = RandomPruner().score_heads(model)
+        assert scores_a == scores_b
+
+    def test_prune_applies_mask(self):
+        model = _tiny_gpt2()
+        mask = RandomPruner().prune(model, sparsity=0.5)
+        assert len(mask) > 0
+        assert all(set(m.unique().tolist()).issubset({0.0, 1.0}) for m in mask.values())
