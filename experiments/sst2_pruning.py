@@ -374,6 +374,44 @@ def _apply_scores(model, scores: dict, sparsity: float) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Overlap analysis helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_prune_set(scores: dict, sparsity: float) -> set[tuple[int, int]]:
+    """Return the (layer, head) pairs that would be pruned at this sparsity."""
+    ranked = sorted(scores.items(), key=lambda kv: kv[1])
+    n_prune = int(len(ranked) * sparsity)
+    return {lh for lh, _ in ranked[:n_prune]}
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a and not b:
+        return 1.0
+    return len(a & b) / len(a | b)
+
+
+def _print_overlap_table(all_scores: dict) -> None:
+    """Print Jaccard overlap between every pruner pair at each sparsity."""
+    pairs = [("magnitude", "activation"), ("magnitude", "ricci"), ("activation", "ricci")]
+    pair_labels = ["Mag–Act", "Mag–Ricci", "Act–Ricci"]
+    col_w = 12
+    header = f"{'Sparsity':>10}" + "".join(f"  {lbl:>{col_w}}" for lbl in pair_labels)
+    sep = "=" * len(header)
+    print(f"\nJaccard overlap between pruner prune sets\n{sep}\n{header}\n{sep}")
+    for sparsity in SPARSITIES:
+        if sparsity == 0.0:
+            continue
+        row = f"{sparsity * 100:>9.0f}%"
+        for p1, p2 in pairs:
+            s1 = _get_prune_set(all_scores[p1], sparsity)
+            s2 = _get_prune_set(all_scores[p2], sparsity)
+            row += f"  {_jaccard(s1, s2):>{col_w}.3f}"
+        print(row)
+    print(sep)
+
+
+# ---------------------------------------------------------------------------
 # Main sweep
 # ---------------------------------------------------------------------------
 
@@ -389,16 +427,19 @@ def run_sweep(
     output: str | None = None,
     device: str | None = None,
     seed: int = 42,
-) -> dict[str, dict[float, float]]:
+    return_scores: bool = False,
+):
     """Full fine-tune → pre-score → sweep → evaluate pipeline.
 
-    Returns nested dict ``pruner_name → sparsity → accuracy``.
+    Returns nested dict ``pruner_name → sparsity → accuracy``, or a
+    ``(results, all_scores)`` tuple when ``return_scores=True``.
 
     Args:
         task: GLUE task name — ``"sst2"``, ``"rte"``, or ``"cola"``.
         n_train: Training examples.  Defaults to 1000 for SST-2/CoLA, 2000 for RTE.
         output: Output figure path.  Defaults to ``"<task>_results.png"``.
         seed: Random seed for fine-tuning and data shuffling reproducibility.
+        return_scores: If True, also return the raw importance-score dicts.
     """
     torch.manual_seed(seed)
 
@@ -465,6 +506,8 @@ def run_sweep(
             logger.info("  → accuracy = %.3f", acc)
 
     _plot_results(results, baseline_acc, output, task=task)
+    if return_scores:
+        return results, all_scores
     return results
 
 
@@ -659,6 +702,103 @@ def _plot_comparison(
     plt.close(fig)
 
 
+def _plot_overlap(
+    all_scores: dict,
+    output: str,
+    task: str = "sst2",
+    heatmap_sparsity: float = 0.5,
+) -> None:
+    """Two-panel figure: Jaccard similarity across sparsities + head heatmap.
+
+    Top row: Jaccard similarity between each pruner pair across sparsity levels.
+    Bottom row: Which heads each pruner removes at *heatmap_sparsity*, shown as
+    three side-by-side (layer × head) binary heatmaps.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        import numpy as np
+    except ImportError:
+        logger.warning("matplotlib / numpy not installed — skipping overlap plot.")
+        return
+
+    all_heads = set(all_scores["magnitude"].keys())
+    n_layers = max(l for l, h in all_heads) + 1
+    n_heads_per = max(h for l, h in all_heads) + 1
+
+    pairs = [("magnitude", "activation"), ("magnitude", "ricci"), ("activation", "ricci")]
+    pair_labels = ["Mag–Act", "Mag–Ricci", "Act–Ricci"]
+    pair_colors = ["#9467bd", "#8c564b", "#e377c2"]
+    pruner_colors = {
+        "magnitude": "#1f77b4",
+        "activation": "#ff7f0e",
+        "ricci": "#2ca02c",
+    }
+
+    nonzero_s = [s for s in SPARSITIES if s > 0.0]
+    xs = [s * 100 for s in nonzero_s]
+
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    fig.suptitle(
+        f"Head prune-set overlap — GPT-2 on {task.upper()}",
+        fontsize=12,
+    )
+
+    # ---- top row: Jaccard line plot (span all 3 columns) ----
+    ax_jac = fig.add_subplot(2, 1, 1)
+    for (p1, p2), lbl, col in zip(pairs, pair_labels, pair_colors):
+        jacs = [_jaccard(_get_prune_set(all_scores[p1], s),
+                         _get_prune_set(all_scores[p2], s)) for s in nonzero_s]
+        ax_jac.plot(xs, jacs, label=lbl, color=col, marker="o", linewidth=2, markersize=7)
+
+    ax_jac.set_xlabel("Head sparsity (%)", fontsize=11)
+    ax_jac.set_ylabel("Jaccard similarity", fontsize=11)
+    ax_jac.set_ylim(-0.05, 1.05)
+    ax_jac.set_title("Jaccard similarity between pruner prune sets", fontsize=11)
+    ax_jac.legend(fontsize=10)
+    ax_jac.grid(True, linestyle="--", alpha=0.5)
+
+    # Remove the placeholder subplots from the bottom row's GridSpec
+    for ax in axes[0]:
+        ax.remove()
+
+    # ---- bottom row: one heatmap per pruner at heatmap_sparsity ----
+    prune_sets = {
+        name: _get_prune_set(all_scores[name], heatmap_sparsity)
+        for name in PRUNER_NAMES
+    }
+
+    for col_idx, name in enumerate(PRUNER_NAMES):
+        ax = axes[1, col_idx]
+        grid = np.zeros((n_layers, n_heads_per))
+        for (l, h) in prune_sets[name]:
+            grid[l, h] = 1.0
+
+        cmap = plt.matplotlib.colors.ListedColormap(["white", pruner_colors[name]])
+        ax.imshow(grid, cmap=cmap, vmin=0, vmax=1, aspect="auto",
+                  interpolation="nearest")
+        ax.set_title(
+            f"{name.capitalize()}  ({int(heatmap_sparsity * 100)}% sparsity, "
+            f"n={len(prune_sets[name])} heads)",
+            fontsize=10,
+        )
+        ax.set_xlabel("Head index", fontsize=9)
+        ax.set_ylabel("Layer", fontsize=9)
+        ax.set_xticks(range(n_heads_per))
+        ax.set_yticks(range(n_layers))
+        patches = [
+            mpatches.Patch(color="white", label="kept", ec="grey"),
+            mpatches.Patch(color=pruner_colors[name], label="pruned"),
+        ]
+        ax.legend(handles=patches, fontsize=8, loc="lower right")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    out_path = Path(output)
+    fig.savefig(out_path, dpi=150)
+    logger.info("Overlap figure saved to %s", out_path.resolve())
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -724,6 +864,8 @@ def main() -> None:
                         help="Sequence truncation for OT computation")
     parser.add_argument("--output", default=None,
                         help="Output figure path (default: <task>_results.png or <task>_multiseed.png)")
+    parser.add_argument("--overlap", action="store_true",
+                        help="Also compute and plot head prune-set overlap (Jaccard + heatmap)")
     parser.add_argument("--device", default=None, help="Device (cpu/cuda)")
     args = parser.parse_args()
 
@@ -743,11 +885,16 @@ def main() -> None:
 
         for task in ("sst2", "cola"):
             logger.info("======  Task: %s  ======", task.upper())
-            results = run_sweep(task=task, seed=args.seed,
-                                output=f"{task}_results.png", **sweep_kwargs)
+            ret = run_sweep(task=task, seed=args.seed,
+                            output=f"{task}_results.png",
+                            return_scores=args.overlap, **sweep_kwargs)
+            results, all_scores = ret if args.overlap else (ret, None)
             results_by_task[task] = results
             baselines[task] = results["magnitude"][0.0]
             _print_table(task, results)
+            if args.overlap and all_scores is not None:
+                _print_overlap_table(all_scores)
+                _plot_overlap(all_scores, f"{task}_overlap.png", task=task)
 
         out = args.output or "comparison.png"
         _plot_comparison(results_by_task, baselines, out)
@@ -763,9 +910,15 @@ def main() -> None:
         _print_table_multi_seed(args.task, accum)
 
     else:
-        results = run_sweep(task=args.task, seed=args.seed,
-                            output=args.output, **sweep_kwargs)
+        ret = run_sweep(task=args.task, seed=args.seed,
+                        output=args.output,
+                        return_scores=args.overlap, **sweep_kwargs)
+        results, all_scores = ret if args.overlap else (ret, None)
         _print_table(args.task, results)
+        if args.overlap and all_scores is not None:
+            _print_overlap_table(all_scores)
+            overlap_out = args.output.replace(".png", "_overlap.png") if args.output else f"{args.task}_overlap.png"
+            _plot_overlap(all_scores, overlap_out, task=args.task)
 
 
 if __name__ == "__main__":
