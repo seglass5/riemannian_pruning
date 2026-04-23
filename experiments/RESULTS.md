@@ -122,5 +122,36 @@ python experiments/sst2_pruning.py --task cola \
 python experiments/sst2_pruning.py --task both --output comparison.png
 
 # Head prune-set overlap analysis (Jaccard + heatmap)
-python experiments/sst2_pruning.py --task sst2 --overlap
+python experiments/sst2_pruning.py --task sst2 --overlap \
+    --max-train-steps 400 --n-train 2000
 ```
+
+---
+
+## 2026-04-22 — Head prune-set overlap analysis (SST-2)
+
+### Setup
+
+Same fine-tuned model as the multi-seed SST-2 run (400 steps, 2000 examples, seed 42).
+Jaccard similarity J(A,B) = |A∩B| / |A∪B| between each pruner pair's prune sets.
+
+### Jaccard similarity across sparsity levels
+
+| Sparsity | Mag–Act | Mag–Ricci | Act–Ricci |
+|----------|---------|-----------|-----------|
+| 10%      | 0.000   | 0.037     | 0.474     |
+| 20%      | 0.018   | 0.098     | 0.474     |
+| 30%      | 0.036   | 0.132     | 0.410     |
+| 40%      | 0.118   | 0.163     | 0.425     |
+| 50%      | 0.200   | 0.220     | 0.455     |
+
+### Interpretation
+
+**Mag–Ricci is nearly disjoint across all sparsity levels** (0.037 at 10% → 0.220 at 50%). Even when half the network's heads are removed, Magnitude and Ricci share less than a quarter of their prune sets. This directly explains the 15 pp accuracy gap from the multi-seed results: the two methods are operating on fundamentally different populations of heads. Magnitude removes heads with low weight norms regardless of task relevance; Ricci removes heads whose attention geometry is unresponsive to the task loss gradient.
+
+**Act–Ricci overlap is moderate and stable (~0.41–0.47)**. Both methods use task data so they partially agree, but Ricci's gradient modulation captures something beyond mean activation magnitude — they still diverge on more than half the prune set at every sparsity level.
+
+**Mag–Act is near zero at low sparsity** (0.000 at 10%), rising slowly to 0.200 at 50%. Weight norm and activation magnitude measure essentially orthogonal properties of head importance, especially when few heads are pruned.
+
+**Key conclusion**: Ricci and Magnitude are nearly orthogonal pruning strategies. The fact that Ricci's largely disjoint prune set consistently outperforms magnitude's by 15 pp at 50% sparsity is strong evidence that the curvature-based geometric signal — not merely the use of task data — is identifying a structurally distinct and more expendable population of heads.
+
