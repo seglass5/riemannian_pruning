@@ -116,7 +116,7 @@ class BasePruner(ABC):
 # ---------------------------------------------------------------------------
 
 # Names identifying the output projection in attention modules.
-_O_PROJ_NAMES: frozenset[str] = frozenset(["c_proj", "o_proj", "out_proj", "dense"])
+_O_PROJ_NAMES: frozenset[str] = frozenset(["c_proj", "o_proj", "out_proj", "dense", "out_lin"])
 
 
 class HeadPruner(ABC):

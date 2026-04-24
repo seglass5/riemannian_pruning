@@ -268,7 +268,7 @@ def _build_loaders_for_task(
 
 def _load_gpt2_classifier(device: str):
     """Load GPT2ForSequenceClassification with 2 labels."""
-    from transformers import AutoTokenizer, GPT2Config, GPT2ForSequenceClassification
+    from transformers import AutoTokenizer, GPT2ForSequenceClassification
 
     logger.info("Loading GPT-2 sequence classifier …")
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
@@ -278,6 +278,29 @@ def _load_gpt2_classifier(device: str):
     model.config.pad_token_id = tokenizer.eos_token_id
     model = model.to(device)
     return model, tokenizer
+
+
+def _load_distilbert_classifier(device: str):
+    """Load DistilBertForSequenceClassification with 2 labels."""
+    from transformers import AutoTokenizer, DistilBertForSequenceClassification
+
+    logger.info("Loading DistilBERT sequence classifier …")
+    tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+    model = DistilBertForSequenceClassification.from_pretrained(
+        "distilbert-base-uncased", num_labels=2
+    )
+    model = model.to(device)
+    return model, tokenizer
+
+
+def _load_model(model_arch: str, device: str):
+    """Dispatch to the appropriate model loader."""
+    if model_arch == "gpt2":
+        return _load_gpt2_classifier(device)
+    elif model_arch == "distilbert":
+        return _load_distilbert_classifier(device)
+    else:
+        raise ValueError(f"Unknown model_arch {model_arch!r}. Choose 'gpt2' or 'distilbert'.")
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +447,7 @@ def _print_overlap_table(all_scores: dict) -> None:
 
 def run_sweep(
     task: str = "sst2",
+    model_arch: str = "gpt2",
     max_train_steps: int = 100,
     n_train: int | None = None,
     n_calib: int = 80,
@@ -442,6 +466,7 @@ def run_sweep(
 
     Args:
         task: GLUE task name — ``"sst2"``, ``"rte"``, or ``"cola"``.
+        model_arch: Model architecture — ``"gpt2"`` or ``"distilbert"``.
         n_train: Training examples.  Defaults to 1000 for SST-2/CoLA, 2000 for RTE.
         output: Output figure path.  Defaults to ``"<task>_results.png"``.
         seed: Random seed for fine-tuning and data shuffling reproducibility.
@@ -454,9 +479,9 @@ def run_sweep(
     if n_train is None:
         n_train = 2000 if task == "rte" else 1000
     if output is None:
-        output = f"{task}_results.png"
+        output = f"{task}_{model_arch}_results.png"
 
-    model, tokenizer = _load_gpt2_classifier(device)
+    model, tokenizer = _load_model(model_arch, device)
 
     train_loader, calib_loader, eval_loader = _build_loaders_for_task(
         task,
@@ -515,7 +540,7 @@ def run_sweep(
             results[pruner_name][sparsity] = acc
             logger.info("  → accuracy = %.3f", acc)
 
-    _plot_results(results, baseline_acc, output, task=task)
+    _plot_results(results, baseline_acc, output, task=task, model_arch=model_arch)
     if return_scores:
         return results, all_scores
     return results
@@ -525,6 +550,7 @@ def run_multi_seed(
     n_seeds: int = 3,
     base_seed: int = 42,
     task: str = "sst2",
+    model_arch: str = "gpt2",
     output: str | None = None,
     **sweep_kwargs,
 ) -> dict[str, dict[float, list[float]]]:
@@ -541,14 +567,14 @@ def run_multi_seed(
     for i in range(n_seeds):
         seed = base_seed + i
         logger.info("======  Seed %d/%d  (seed=%d)  ======", i + 1, n_seeds, seed)
-        results = run_sweep(task=task, seed=seed, output=None, **sweep_kwargs)
+        results = run_sweep(task=task, model_arch=model_arch, seed=seed, output=None, **sweep_kwargs)
         for name in PRUNER_NAMES:
             for sparsity in SPARSITIES:
                 accum[name][sparsity].append(results[name][sparsity])
 
     if output is None:
-        output = f"{task}_multiseed.png"
-    _plot_results_multi_seed(accum, output, task=task, n_seeds=n_seeds)
+        output = f"{task}_{model_arch}_multiseed.png"
+    _plot_results_multi_seed(accum, output, task=task, model_arch=model_arch, n_seeds=n_seeds)
     return accum
 
 
@@ -557,6 +583,7 @@ def _plot_results(
     baseline_acc: float,
     output: str,
     task: str = "sst2",
+    model_arch: str = "gpt2",
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -586,9 +613,10 @@ def _plot_results(
                label=f"Baseline ({baseline_acc:.3f})")
     ax.set_xlabel("Head sparsity (%)", fontsize=12)
     ax.set_ylabel(f"{task.upper()} accuracy", fontsize=12)
+    model_label = {"gpt2": "GPT-2", "distilbert": "DistilBERT"}.get(model_arch, model_arch)
     ax.set_title(
         f"Classification accuracy vs head sparsity\n"
-        f"GPT-2 fine-tuned on {task.upper()} — Magnitude / Activation / Ricci / Random",
+        f"{model_label} fine-tuned on {task.upper()} — Magnitude / Activation / Ricci / Random",
         fontsize=11,
     )
     ax.legend(fontsize=11)
@@ -605,6 +633,7 @@ def _plot_results_multi_seed(
     accum: dict[str, dict[float, list[float]]],
     output: str,
     task: str = "sst2",
+    model_arch: str = "gpt2",
     n_seeds: int = 3,
 ) -> None:
     """Plot mean ± 1 std accuracy vs sparsity across seeds."""
@@ -639,9 +668,10 @@ def _plot_results_multi_seed(
 
     ax.set_xlabel("Head sparsity (%)", fontsize=12)
     ax.set_ylabel(f"{task.upper()} accuracy", fontsize=12)
+    model_label = {"gpt2": "GPT-2", "distilbert": "DistilBERT"}.get(model_arch, model_arch)
     ax.set_title(
         f"Classification accuracy vs head sparsity (mean ± 1 std, n={n_seeds} seeds)\n"
-        f"GPT-2 fine-tuned on {task.upper()} — Magnitude / Activation / Ricci / Random",
+        f"{model_label} fine-tuned on {task.upper()} — Magnitude / Activation / Ricci / Random",
         fontsize=11,
     )
     ax.legend(fontsize=11)
@@ -862,6 +892,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="GLUE pruning sweep (SST-2 / CoLA / RTE)")
     parser.add_argument("--task", default="sst2", choices=["sst2", "cola", "rte", "both"],
                         help="Task to run: sst2, cola, rte, or both (default: sst2; 'both' runs sst2+cola)")
+    parser.add_argument("--model", default="gpt2", choices=["gpt2", "distilbert"],
+                        help="Model architecture: gpt2 or distilbert (default: gpt2)")
     parser.add_argument("--n-seeds", type=int, default=1,
                         help="Number of random seeds to run and average over (default: 1)")
     parser.add_argument("--seed", type=int, default=42,
@@ -886,6 +918,7 @@ def main() -> None:
     args = parser.parse_args()
 
     sweep_kwargs = dict(
+        model_arch=args.model,
         max_train_steps=args.max_train_steps,
         n_train=args.n_train,
         n_calib=args.n_calib,
@@ -902,7 +935,7 @@ def main() -> None:
         for task in ("sst2", "cola"):
             logger.info("======  Task: %s  ======", task.upper())
             ret = run_sweep(task=task, seed=args.seed,
-                            output=f"{task}_results.png",
+                            output=f"{task}_{args.model}_results.png",
                             return_scores=args.overlap, **sweep_kwargs)
             results, all_scores = ret if args.overlap else (ret, None)
             results_by_task[task] = results
@@ -910,9 +943,9 @@ def main() -> None:
             _print_table(task, results)
             if args.overlap and all_scores is not None:
                 _print_overlap_table(all_scores)
-                _plot_overlap(all_scores, f"{task}_overlap.png", task=task)
+                _plot_overlap(all_scores, f"{task}_{args.model}_overlap.png", task=task)
 
-        out = args.output or "comparison.png"
+        out = args.output or f"{args.model}_comparison.png"
         _plot_comparison(results_by_task, baselines, out)
 
     elif args.n_seeds > 1:
@@ -933,7 +966,7 @@ def main() -> None:
         _print_table(args.task, results)
         if args.overlap and all_scores is not None:
             _print_overlap_table(all_scores)
-            overlap_out = args.output.replace(".png", "_overlap.png") if args.output else f"{args.task}_overlap.png"
+            overlap_out = args.output.replace(".png", "_overlap.png") if args.output else f"{args.task}_{args.model}_overlap.png"
             _plot_overlap(all_scores, overlap_out, task=args.task)
 
 

@@ -59,9 +59,9 @@ _ATTN_PATTERNS: frozenset[str] = frozenset(["attention"])
 _MLP_PATTERNS: frozenset[str] = frozenset(["mlp", "feedforward", "ffn"])
 
 # Child-module names that identify Q / K / V / fused-QKV projections.
-_Q_NAMES: frozenset[str] = frozenset(["q_proj", "query", "q_attn", "wq"])
-_K_NAMES: frozenset[str] = frozenset(["k_proj", "key", "k_attn", "wk"])
-_V_NAMES: frozenset[str] = frozenset(["v_proj", "value", "v_attn", "wv"])
+_Q_NAMES: frozenset[str] = frozenset(["q_proj", "query", "q_attn", "wq", "q_lin"])
+_K_NAMES: frozenset[str] = frozenset(["k_proj", "key", "k_attn", "wk", "k_lin"])
+_V_NAMES: frozenset[str] = frozenset(["v_proj", "value", "v_attn", "wv", "v_lin"])
 _QKV_NAMES: frozenset[str] = frozenset(["c_attn", "qkv", "in_proj", "qkv_proj"])
 
 

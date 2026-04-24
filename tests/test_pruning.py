@@ -367,6 +367,71 @@ class TestRicciPruner:
         assert len(mask) > 0
 
 
+def _tiny_distilbert():
+    """Build a minimal DistilBERT model entirely from config (no download needed)."""
+    from transformers import DistilBertConfig, DistilBertForSequenceClassification
+
+    cfg = DistilBertConfig(
+        vocab_size=64,
+        dim=32,
+        n_heads=4,
+        n_layers=2,
+        hidden_dim=64,
+        max_position_embeddings=16,
+        num_labels=2,
+    )
+    torch.manual_seed(0)
+    return DistilBertForSequenceClassification(cfg)
+
+
+# ---------------------------------------------------------------------------
+# DistilBERT support (inspector detects q_lin / k_lin / v_lin)
+# ---------------------------------------------------------------------------
+
+
+class TestDistilBERTSupport:
+    def test_inspector_detects_layers(self):
+        from src.models.inspector import TransformerInspector
+
+        model = _tiny_distilbert()
+        inspector = TransformerInspector(model)
+        assert inspector.n_layers == 2
+
+    def test_inspector_detects_separate_qkv(self):
+        from src.models.inspector import TransformerInspector
+
+        model = _tiny_distilbert()
+        inspector = TransformerInspector(model)
+        info = inspector.layer_info(0)
+        assert info.q_mod is not None, "q_lin not detected"
+        assert info.k_mod is not None, "k_lin not detected"
+        assert info.v_mod is not None, "v_lin not detected"
+        assert info.qkv_mod is None, "should not have fused QKV"
+
+    def test_magnitude_scores_all_heads(self):
+        model = _tiny_distilbert()
+        scores = MagnitudePruner().score_heads(model)
+        assert len(scores) == 8  # 2 layers × 4 heads
+        assert all(v >= 0.0 for v in scores.values())
+
+    def test_prune_zeros_head_weights(self):
+        torch.manual_seed(0)
+        model = _tiny_distilbert()
+        pruner = MagnitudePruner()
+        mask = pruner.prune(model, sparsity=0.5)
+        assert len(mask) > 0
+        total_zeros = sum((m == 0).sum().item() for m in mask.values())
+        assert total_zeros > 0
+
+    def test_activation_pruner_with_data(self):
+        model = _tiny_distilbert()
+        data = _fake_dataloader(batch_size=2, seq_len=8, n_batches=2)
+        pruner = ActivationPruner()
+        scores = pruner.score_heads(model, dataloader=data)
+        assert len(scores) == 8
+        assert all(v >= 0.0 for v in scores.values())
+
+
 class TestRandomPruner:
     def test_returns_correct_number_of_scores(self):
         model = _tiny_gpt2()
