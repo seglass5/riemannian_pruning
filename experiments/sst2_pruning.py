@@ -458,6 +458,7 @@ def run_sweep(
     device: str | None = None,
     seed: int = 42,
     return_scores: bool = False,
+    invert_ricci: bool = False,
 ):
     """Full fine-tune → pre-score → sweep → evaluate pipeline.
 
@@ -471,6 +472,9 @@ def run_sweep(
         output: Output figure path.  Defaults to ``"<task>_results.png"``.
         seed: Random seed for fine-tuning and data shuffling reproducibility.
         return_scores: If True, also return the raw importance-score dicts.
+        invert_ricci: If True, also run an inverted-Ricci pruner that prunes
+            heads with the *highest* |Δκ| first (tests the directional-inversion
+            hypothesis for bidirectional models).
     """
     torch.manual_seed(seed)
 
@@ -522,10 +526,13 @@ def run_sweep(
         "ricci": ricci_scores,
         "random": rand_scores,
     }
+    if invert_ricci:
+        all_scores["ricci_inv"] = {k: -v for k, v in ricci_scores.items()}
 
-    results: dict[str, dict[float, float]] = {name: {} for name in PRUNER_NAMES}
+    active_pruners = list(all_scores.keys())
+    results: dict[str, dict[float, float]] = {name: {} for name in active_pruners}
 
-    for pruner_name in PRUNER_NAMES:
+    for pruner_name in active_pruners:
         logger.info("=== Pruner: %s ===", pruner_name)
         scores = all_scores[pruner_name]
 
@@ -560,17 +567,17 @@ def run_multi_seed(
 
     Returns nested dict ``pruner_name → sparsity → [accuracy per seed]``.
     """
-    accum: dict[str, dict[float, list[float]]] = {
-        name: {s: [] for s in SPARSITIES} for name in PRUNER_NAMES
-    }
+    accum: dict[str, dict[float, list[float]]] = {}
 
     for i in range(n_seeds):
         seed = base_seed + i
         logger.info("======  Seed %d/%d  (seed=%d)  ======", i + 1, n_seeds, seed)
         results = run_sweep(task=task, model_arch=model_arch, seed=seed, output=None, **sweep_kwargs)
-        for name in PRUNER_NAMES:
+        for name, sparsity_acc in results.items():
+            if name not in accum:
+                accum[name] = {s: [] for s in SPARSITIES}
             for sparsity in SPARSITIES:
-                accum[name][sparsity].append(results[name][sparsity])
+                accum[name][sparsity].append(sparsity_acc[sparsity])
 
     if output is None:
         output = f"{task}_{model_arch}_multiseed.png"
@@ -592,9 +599,9 @@ def _plot_results(
         return
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    markers = {"magnitude": "o", "activation": "s", "ricci": "^", "random": "x"}
-    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c", "random": "#d62728"}
-    linestyles = {"magnitude": "-", "activation": "-", "ricci": "-", "random": "--"}
+    markers = {"magnitude": "o", "activation": "s", "ricci": "^", "random": "x", "ricci_inv": "v"}
+    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c", "random": "#d62728", "ricci_inv": "#9467bd"}
+    linestyles = {"magnitude": "-", "activation": "-", "ricci": "-", "random": "--", "ricci_inv": ":"}
 
     for name, acc_by_sparsity in results.items():
         xs = [s * 100 for s in sorted(acc_by_sparsity)]
@@ -646,9 +653,9 @@ def _plot_results_multi_seed(
     import statistics
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    markers = {"magnitude": "o", "activation": "s", "ricci": "^", "random": "x"}
-    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c", "random": "#d62728"}
-    linestyles = {"magnitude": "-", "activation": "-", "ricci": "-", "random": "--"}
+    markers = {"magnitude": "o", "activation": "s", "ricci": "^", "random": "x", "ricci_inv": "v"}
+    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c", "random": "#d62728", "ricci_inv": "#9467bd"}
+    linestyles = {"magnitude": "-", "activation": "-", "ricci": "-", "random": "--", "ricci_inv": ":"}
 
     for name, acc_by_sparsity in accum.items():
         xs = [s * 100 for s in sorted(acc_by_sparsity)]
@@ -701,9 +708,9 @@ def _plot_comparison(
     if len(tasks) == 1:
         axes = [axes]
 
-    markers = {"magnitude": "o", "activation": "s", "ricci": "^", "random": "x"}
-    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c", "random": "#d62728"}
-    linestyles = {"magnitude": "-", "activation": "-", "ricci": "-", "random": "--"}
+    markers = {"magnitude": "o", "activation": "s", "ricci": "^", "random": "x", "ricci_inv": "v"}
+    colors = {"magnitude": "#1f77b4", "activation": "#ff7f0e", "ricci": "#2ca02c", "random": "#d62728", "ricci_inv": "#9467bd"}
+    linestyles = {"magnitude": "-", "activation": "-", "ricci": "-", "random": "--", "ricci_inv": ":"}
 
     for ax, task in zip(axes, tasks):
         results = results_by_task[task]
@@ -851,12 +858,13 @@ def _plot_overlap(
 
 
 def _print_table(task: str, results: dict[str, dict[float, float]]) -> None:
-    header = f"{'Sparsity':>10}" + "".join(f"  {n.capitalize():>12}" for n in PRUNER_NAMES)
+    pruner_names = list(results.keys())
+    header = f"{'Sparsity':>10}" + "".join(f"  {n.capitalize():>12}" for n in pruner_names)
     sep = "=" * len(header)
     print(f"\n{task.upper()}\n{sep}\n{header}\n{sep}")
     for sparsity in SPARSITIES:
         row = f"{sparsity * 100:>9.0f}%"
-        for name in PRUNER_NAMES:
+        for name in pruner_names:
             acc = results[name].get(sparsity, float("nan"))
             row += f"  {acc:>12.3f}"
         print(row)
@@ -869,12 +877,13 @@ def _print_table_multi_seed(
 ) -> None:
     import statistics
     col_w = 18
-    header = f"{'Sparsity':>10}" + "".join(f"  {n.capitalize():>{col_w}}" for n in PRUNER_NAMES)
+    pruner_names = list(accum.keys())
+    header = f"{'Sparsity':>10}" + "".join(f"  {n.capitalize():>{col_w}}" for n in pruner_names)
     sep = "=" * len(header)
     print(f"\n{task.upper()}  (mean ± std)\n{sep}\n{header}\n{sep}")
     for sparsity in SPARSITIES:
         row = f"{sparsity * 100:>9.0f}%"
-        for name in PRUNER_NAMES:
+        for name in pruner_names:
             vals = accum[name].get(sparsity, [])
             if not vals:
                 row += f"  {'nan':>{col_w}}"
@@ -914,6 +923,8 @@ def main() -> None:
                         help="Output figure path (default: <task>_results.png or <task>_multiseed.png)")
     parser.add_argument("--overlap", action="store_true",
                         help="Also compute and plot head prune-set overlap (Jaccard + heatmap)")
+    parser.add_argument("--invert-ricci", action="store_true",
+                        help="Also run inverted-Ricci (prune highest |Δκ| first) to test directional-inversion hypothesis")
     parser.add_argument("--device", default=None, help="Device (cpu/cuda)")
     args = parser.parse_args()
 
@@ -926,6 +937,7 @@ def main() -> None:
         n_ricci_batches=args.n_ricci_batches,
         max_seq_len=args.max_seq_len,
         device=args.device,
+        invert_ricci=args.invert_ricci,
     )
 
     if args.task == "both":
