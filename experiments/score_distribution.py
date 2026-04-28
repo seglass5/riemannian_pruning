@@ -313,6 +313,194 @@ def plot_scatter(
 
 
 # ---------------------------------------------------------------------------
+# Inter-seed ranking stability
+# ---------------------------------------------------------------------------
+
+
+def compute_inter_seed_scores(
+    model_arch: str,
+    task: str,
+    n_seeds: int,
+    base_seed: int,
+    max_train_steps: int,
+    n_train: int,
+    n_calib: int,
+    n_ricci_batches: int,
+    max_seq_len: int,
+    device: str,
+) -> list[dict[str, dict[tuple[int, int], float]]]:
+    """Fine-tune n_seeds models and return scores for each.
+
+    Returns:
+        List of ``{"magnitude": scores, "ricci": scores}`` dicts, one per seed.
+    """
+    return [
+        compute_scores(
+            model_arch=model_arch,
+            task=task,
+            max_train_steps=max_train_steps,
+            n_train=n_train,
+            n_calib=n_calib,
+            n_ricci_batches=n_ricci_batches,
+            max_seq_len=max_seq_len,
+            device=device,
+            seed=base_seed + i,
+        )
+        for i in range(n_seeds)
+    ]
+
+
+def _pairwise_rank_correlations(
+    seed_scores: list[dict[str, dict[tuple[int, int], float]]],
+    pruner: str,
+) -> list[float]:
+    """Spearman ρ between score vectors for every seed pair."""
+    from scipy.stats import spearmanr
+
+    heads = sorted(seed_scores[0][pruner].keys())
+    rhos = []
+    for i in range(len(seed_scores)):
+        for j in range(i + 1, len(seed_scores)):
+            vi = [seed_scores[i][pruner][h] for h in heads]
+            vj = [seed_scores[j][pruner][h] for h in heads]
+            rho, _ = spearmanr(vi, vj)
+            rhos.append(rho)
+    return rhos
+
+
+def print_inter_seed_table(
+    all_inter_seed: dict[str, list[dict[str, dict[tuple[int, int], float]]]],
+) -> None:
+    """Print mean inter-seed Spearman ρ for each arch × pruner combination.
+
+    High ρ → scores consistent across seeds → stable rankings.
+    Low ρ → scores drift between seeds → rankings flip → high outcome variance.
+    """
+    col = 10
+    header = (
+        f"{'Architecture / Pruner':<38}"
+        f"  {'Pairs':>{col}}"
+        f"  {'Mean ρ':>{col}}"
+        f"  {'Min ρ':>{col}}"
+        f"  {'Max ρ':>{col}}"
+    )
+    sep = "=" * len(header)
+    print(f"\nInter-seed Spearman rank correlation (score ranking stability)\n{sep}")
+    print(f"{header}\n{sep}")
+
+    for arch, seed_scores in all_inter_seed.items():
+        label_prefix = ARCH_LABELS[arch]
+        for pruner in ("magnitude", "ricci"):
+            rhos = _pairwise_rank_correlations(seed_scores, pruner)
+            label = f"{label_prefix} / {pruner}"
+            print(
+                f"{label:<38}"
+                f"  {len(rhos):>{col}}"
+                f"  {statistics.mean(rhos):>{col}.4f}"
+                f"  {min(rhos):>{col}.4f}"
+                f"  {max(rhos):>{col}.4f}"
+            )
+        print("-" * len(header))
+
+    # Stability ratio: GPT-2 Ricci mean ρ / DistilBERT Ricci mean ρ
+    if "gpt2" in all_inter_seed and "distilbert" in all_inter_seed:
+        rho_gpt2 = statistics.mean(
+            _pairwise_rank_correlations(all_inter_seed["gpt2"], "ricci")
+        )
+        rho_db = statistics.mean(
+            _pairwise_rank_correlations(all_inter_seed["distilbert"], "ricci")
+        )
+        print(f"\nRicci inter-seed ρ: GPT-2 = {rho_gpt2:.4f}  DistilBERT = {rho_db:.4f}")
+        if rho_db != 0:
+            print(f"Stability ratio (GPT-2 / DistilBERT): {rho_gpt2 / rho_db:.2f}×")
+            print("  Higher → GPT-2 Ricci rankings lock in more consistently across seeds")
+    print(sep)
+
+
+def plot_inter_seed_scatter(
+    all_inter_seed: dict[str, list[dict[str, dict[tuple[int, int], float]]]],
+    output: str,
+) -> None:
+    """Score scatter between seed 0 and seed 1 for each (arch, pruner) — 2×2 grid.
+
+    A tight diagonal cluster means the ranking is stable across seeds.
+    A diffuse cloud means the ranking changes substantially between fine-tuning runs.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from scipy.stats import spearmanr
+    except ImportError:
+        logger.warning("matplotlib / scipy not installed — skipping inter-seed scatter.")
+        return
+
+    archs = list(all_inter_seed)
+    pruners = ["magnitude", "ricci"]
+    pruner_colors = {"magnitude": "#1f77b4", "ricci": "#2ca02c"}
+
+    n_rows, n_cols = len(archs), len(pruners)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+    if n_rows == 1:
+        axes = [axes]
+
+    for row, arch in enumerate(archs):
+        seed_scores = all_inter_seed[arch]
+        if len(seed_scores) < 2:
+            continue
+        for col, pruner in enumerate(pruners):
+            ax = axes[row][col]
+            heads = sorted(seed_scores[0][pruner].keys())
+            layers = sorted({l for l, h in heads})
+            cmap = plt.cm.viridis
+            layer_colors = {l: cmap(i / max(len(layers) - 1, 1)) for i, l in enumerate(layers)}
+
+            for layer in layers:
+                hs = [(l, h) for (l, h) in heads if l == layer]
+                xs = [seed_scores[0][pruner][k] for k in hs]
+                ys = [seed_scores[1][pruner][k] for k in hs]
+                ax.scatter(xs, ys, color=layer_colors[layer], s=55, alpha=0.8,
+                           label=f"L{layer}", zorder=3)
+
+            # Diagonal reference line
+            all_vals = np.array(
+                [seed_scores[0][pruner][h] for h in heads]
+                + [seed_scores[1][pruner][h] for h in heads]
+            )
+            lo, hi = all_vals.min(), all_vals.max()
+            ax.plot([lo, hi], [lo, hi], "k--", linewidth=1, alpha=0.4, zorder=1)
+
+            rho, pval = spearmanr(
+                [seed_scores[0][pruner][h] for h in heads],
+                [seed_scores[1][pruner][h] for h in heads],
+            )
+            ax.text(
+                0.05, 0.95,
+                f"Spearman ρ = {rho:.3f}",
+                transform=ax.transAxes, ha="left", va="top", fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
+            )
+            ax.set_xlabel("Score (seed 0)", fontsize=9)
+            ax.set_ylabel("Score (seed 1)", fontsize=9)
+            ax.set_title(
+                f"{ARCH_LABELS[arch]}\n{pruner.capitalize()} — inter-seed stability",
+                fontsize=9,
+            )
+            ax.legend(fontsize=6, ncol=3, loc="lower right")
+            ax.grid(True, linestyle="--", alpha=0.4)
+
+    fig.suptitle(
+        "Inter-seed score ranking stability: seed 0 vs seed 1\n"
+        "Tight diagonal → stable → reliable pruning  |  Diffuse cloud → unstable → noisy outcomes",
+        fontsize=11,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    out = Path(output)
+    fig.savefig(out, dpi=150)
+    logger.info("Inter-seed scatter saved to %s", out.resolve())
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -331,34 +519,58 @@ def main() -> None:
     parser.add_argument("--n-calib", type=int, default=80)
     parser.add_argument("--n-ricci-batches", type=int, default=10)
     parser.add_argument("--max-seq-len", type=int, default=64)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Base seed; inter-seed mode uses seed, seed+1, …")
+    parser.add_argument("--n-seeds", type=int, default=1,
+                        help="Seeds for inter-seed stability analysis (default 1 = single-seed mode)")
     parser.add_argument("--dist-output", default="score_distributions.png",
                         help="Output path for KDE distribution figure")
     parser.add_argument("--scatter-output", default="score_scatter.png",
                         help="Output path for magnitude-vs-Ricci scatter figure")
+    parser.add_argument("--inter-seed-output", default="score_inter_seed.png",
+                        help="Output path for inter-seed ranking scatter figure")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     archs = ["gpt2", "distilbert"] if args.model == "both" else [args.model]
 
-    all_scores: dict[str, dict[str, dict[tuple[int, int], float]]] = {}
-    for arch in archs:
-        all_scores[arch] = compute_scores(
-            model_arch=arch,
-            task=args.task,
-            max_train_steps=args.max_train_steps,
-            n_train=args.n_train,
-            n_calib=args.n_calib,
-            n_ricci_batches=args.n_ricci_batches,
-            max_seq_len=args.max_seq_len,
-            device=device,
-            seed=args.seed,
-        )
+    score_kwargs = dict(
+        task=args.task,
+        max_train_steps=args.max_train_steps,
+        n_train=args.n_train,
+        n_calib=args.n_calib,
+        n_ricci_batches=args.n_ricci_batches,
+        max_seq_len=args.max_seq_len,
+        device=device,
+    )
 
-    print_stats_table(all_scores)
-    plot_distributions(all_scores, args.dist_output)
-    plot_scatter(all_scores, args.scatter_output)
+    if args.n_seeds > 1:
+        # Inter-seed stability mode: fine-tune n_seeds models per architecture.
+        all_inter_seed: dict[str, list[dict]] = {}
+        for arch in archs:
+            all_inter_seed[arch] = compute_inter_seed_scores(
+                model_arch=arch, n_seeds=args.n_seeds, base_seed=args.seed, **score_kwargs
+            )
+
+        # Single-seed stats/plots use seed 0 scores from each arch.
+        all_scores = {arch: runs[0] for arch, runs in all_inter_seed.items()}
+        print_stats_table(all_scores)
+        print_inter_seed_table(all_inter_seed)
+        plot_distributions(all_scores, args.dist_output)
+        plot_scatter(all_scores, args.scatter_output)
+        plot_inter_seed_scatter(all_inter_seed, args.inter_seed_output)
+
+    else:
+        # Single-seed mode: distribution and scatter only.
+        all_scores = {}
+        for arch in archs:
+            all_scores[arch] = compute_scores(
+                model_arch=arch, seed=args.seed, **score_kwargs
+            )
+        print_stats_table(all_scores)
+        plot_distributions(all_scores, args.dist_output)
+        plot_scatter(all_scores, args.scatter_output)
 
 
 if __name__ == "__main__":
