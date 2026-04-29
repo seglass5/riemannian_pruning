@@ -364,4 +364,69 @@ python experiments/sst2_pruning.py --task sst2 --model bert \
     --n-seeds 3 --invert-ricci
 ```
 
+---
 
+## 2026-04-29 — GPT-2 Large SST-2 sparsity sweep
+
+### Setup
+
+- **Model**: GPT-2 Large (`GPT2ForSequenceClassification`, 774M, 36 layers × 20 heads = 720 heads total)
+- **Fine-tuning**: AdamW, lr=2e-5, gradient clipping 1.0
+- **Seeds**: 42/43/44 (3 seeds), with `--invert-ricci`
+- **Calibration / eval**: 80 / 200 validation examples
+- **Majority-class baseline**: ~50% (balanced binary)
+
+### Results (multi-seed, mean ± std)
+
+| Sparsity | Magnitude | Activation | Ricci | Random | Ricci_inv |
+|----------|-----------|------------|-------|--------|-----------|
+| 0%  | 0.915 ±0.017 | 0.915 ±0.017 | 0.915 ±0.017 | 0.915 ±0.017 | 0.915 ±0.017 |
+| 10% | 0.912 ±0.012 | 0.915 ±0.013 | 0.662 ±0.040 | **0.913 ±0.012** | 0.890 ±0.036 |
+| 20% | 0.888 ±0.019 | 0.883 ±0.021 | 0.777 ±0.006 | **0.912 ±0.008** | 0.852 ±0.053 |
+| 30% | 0.805 ±0.009 | 0.818 ±0.008 | 0.745 ±0.026 | **0.915 ±0.013** | 0.813 ±0.056 |
+| 40% | 0.763 ±0.019 | 0.798 ±0.010 | 0.743 ±0.025 | **0.885 ±0.035** | 0.760 ±0.043 |
+| 50% | 0.727 ±0.008 | 0.790 ±0.010 | 0.725 ±0.035 | **0.850 ±0.031** | 0.703 ±0.016 |
+
+**Ranking at 50% sparsity: Random (0.850) > Activation (0.790) > Magnitude (0.727) ≈ Ricci (0.725) > Ricci_inv (0.703).**
+
+### Observations
+
+**The scaling hypothesis is reversed.** The expectation was that a deeper, wider model would produce stronger curvature variation across heads, making Ricci more discriminating. The opposite occurs: at Large scale, Random is the best pruner at every sparsity level from 10% onwards, and Ricci collapses catastrophically.
+
+**Forward Ricci collapses immediately.** At 10% sparsity — removing only 72 of 720 heads — Ricci drops 25.3 pp from baseline (0.662 ±0.040). For comparison, GPT-2 base dropped only 4.9 pp at the same sparsity ratio. Ricci is zeroing in on a tiny concentrated set of heads that GPT-2 Large relies on most heavily. This is the correct heads in the wrong direction — Ricci has found the essential core, but by labelling it "low importance" it removes it first.
+
+**Neither Ricci direction is useful at this scale.** Both forward (0.725) and inverted (0.703) lose decisively to Random (0.850) at 50%. The problem is not directional inversion — Ricci_inv wins for bidirectional models — but that Ricci's curvature signal is concentrating into a small critical mass whose removal is catastrophic regardless of direction.
+
+**Random matching baseline at 30%** (0.915 ±0.013 = same as 0%) is the most striking result: removing 30% of 720 heads at random leaves the model fully intact on average. This implies that at this scale, the critical heads constitute a small enough fraction of total heads that random pruning rarely hits them. GPT-2 Large has reached a regime where most heads are redundant and expendable by default.
+
+**Activation is the best structured method** (0.790 ±0.010 at 50%), likely because mean |V-activation| is a distributed signal that doesn't concentrate into the same small critical set that Ricci targets. Activation removes the flattest, most inert heads — a safe proxy for "not doing anything" — which works well in a highly redundant model.
+
+### Architectural interpretation
+
+The GPT-2 Large result reveals a **head importance concentration effect** at scale:
+
+- **GPT-2 base** (144 heads): importance is distributed — Ricci identifies a diffuse set of task-sensitive heads whose removal degrades accuracy smoothly
+- **GPT-2 Large** (720 heads): importance is concentrated — a small critical subset (perhaps 5-10% of heads) accounts for the bulk of task performance; the rest are genuinely redundant
+
+In this concentrated regime:
+1. Random pruning is near-optimal because it almost never hits the critical subset
+2. Any structured method that is biased toward the high-importance signal (Ricci, and to a lesser extent Magnitude) is penalised because it systematically targets exactly what should not be removed
+3. Activation is relatively safe because low activation magnitude is a proxy for dormancy, not for task-relevance gradient
+
+This pattern is consistent with the lottery-ticket hypothesis at scale: large models contain a small sparse subnetwork that carries most task information, and the surrounding redundant parameters are easily pruned. Ricci's gradient-modulated curvature is effectively finding the winning ticket — but structured pruning needs to *keep* it, not remove it.
+
+### Updated scaling comparison ✓
+
+| Model | Heads | Baseline | Ricci at 50% | Best method at 50% | Ricci vs best |
+|-------|-------|----------|--------------|--------------------|---------------|
+| GPT-2 base | 144 | 0.822 ±0.032 | **0.720 ±0.005** | Ricci | — (Ricci wins) |
+| GPT-2 Large | 720 | 0.915 ±0.017 | 0.725 ±0.035 | Random (0.850) | −12.5 pp |
+
+The Ricci advantage does not grow with scale. Instead, the curvature signal shifts from identifying a *diffuse expendable population* (base model) to identifying a *concentrated essential core* (large model). For large models, the correct strategy may be Ricci-guided preservation (keep the high-|Δκ| heads, prune everything else) rather than Ricci-guided removal — but that is exactly what Ricci_inv does and it also fails here (0.703), suggesting the concentration problem is more fundamental than a direction flip.
+
+### Script used
+
+```bash
+python experiments/sst2_pruning.py --task sst2 --model gpt2-large \
+    --n-seeds 3 --invert-ricci
+```
