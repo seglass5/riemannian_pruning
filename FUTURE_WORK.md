@@ -7,6 +7,8 @@ roughly ordered by expected scientific payoff.
 
 ## 1. Scale within causal attention — GPT-2 Medium / Large
 
+**Status**: ✅ implemented (`--model gpt2-medium` / `--model gpt2-large`)
+
 **Question**: does the Ricci advantage grow with model depth and width?
 
 GPT-2 Medium (355M, 24 layers × 16 heads = 384 heads) and Large (774M,
@@ -18,10 +20,6 @@ more discriminating.
 A scaling curve (117M → 355M → 774M) would make the result more practically
 relevant and show whether the Ricci advantage is robust or diminishes as
 magnitude-based methods also gain more signal from larger weight variance.
-
-**Implementation**: add `"gpt2-medium"` and `"gpt2-large"` to `_load_model()`
-in `experiments/sst2_pruning.py`. The architecture is identical to GPT-2 base;
-only the config changes.
 
 ---
 
@@ -123,7 +121,7 @@ DistilBERT SST-2 (wrong direction) are separable or interact.
 
 | Direction | Status | Priority |
 |-----------|--------|----------|
-| GPT-2 Medium/Large scaling | not started | high |
+| GPT-2 Medium/Large scaling | ✅ implemented | — |
 | BERT-base bidirectional bridge | ✅ implemented | — |
 | Head prune-set visualisation | not started | high |
 | Additive modulation | not started | medium |

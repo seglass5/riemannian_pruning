@@ -266,15 +266,18 @@ def _build_loaders_for_task(
 # ---------------------------------------------------------------------------
 
 
-def _load_gpt2_classifier(device: str):
-    """Load GPT2ForSequenceClassification with 2 labels."""
+def _load_gpt2_classifier(device: str, variant: str = "gpt2"):
+    """Load GPT2ForSequenceClassification with 2 labels.
+
+    variant: "gpt2" (117M), "gpt2-medium" (355M), or "gpt2-large" (774M).
+    """
     from transformers import AutoTokenizer, GPT2ForSequenceClassification
 
-    logger.info("Loading GPT-2 sequence classifier …")
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    logger.info("Loading %s sequence classifier …", variant)
+    tokenizer = AutoTokenizer.from_pretrained(variant)
     tokenizer.pad_token = tokenizer.eos_token
 
-    model = GPT2ForSequenceClassification.from_pretrained("gpt2", num_labels=2)
+    model = GPT2ForSequenceClassification.from_pretrained(variant, num_labels=2)
     model.config.pad_token_id = tokenizer.eos_token_id
     model = model.to(device)
     return model, tokenizer
@@ -308,14 +311,17 @@ def _load_bert_classifier(device: str):
 
 def _load_model(model_arch: str, device: str):
     """Dispatch to the appropriate model loader."""
-    if model_arch == "gpt2":
-        return _load_gpt2_classifier(device)
+    if model_arch in ("gpt2", "gpt2-medium", "gpt2-large"):
+        return _load_gpt2_classifier(device, variant=model_arch)
     elif model_arch == "distilbert":
         return _load_distilbert_classifier(device)
     elif model_arch == "bert":
         return _load_bert_classifier(device)
     else:
-        raise ValueError(f"Unknown model_arch {model_arch!r}. Choose 'gpt2', 'distilbert', or 'bert'.")
+        raise ValueError(
+            f"Unknown model_arch {model_arch!r}. "
+            "Choose 'gpt2', 'gpt2-medium', 'gpt2-large', 'distilbert', or 'bert'."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -916,8 +922,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="GLUE pruning sweep (SST-2 / CoLA / RTE)")
     parser.add_argument("--task", default="sst2", choices=["sst2", "cola", "rte", "both"],
                         help="Task to run: sst2, cola, rte, or both (default: sst2; 'both' runs sst2+cola)")
-    parser.add_argument("--model", default="gpt2", choices=["gpt2", "distilbert", "bert"],
-                        help="Model architecture: gpt2, distilbert, or bert (default: gpt2)")
+    parser.add_argument("--model", default="gpt2",
+                        choices=["gpt2", "gpt2-medium", "gpt2-large", "distilbert", "bert"],
+                        help="Model architecture (default: gpt2)")
     parser.add_argument("--n-seeds", type=int, default=1,
                         help="Number of random seeds to run and average over (default: 1)")
     parser.add_argument("--seed", type=int, default=42,
