@@ -465,3 +465,68 @@ class TestRandomPruner:
         mask = RandomPruner().prune(model, sparsity=0.5)
         assert len(mask) > 0
         assert all(set(m.unique().tolist()).issubset({0.0, 1.0}) for m in mask.values())
+
+
+def _tiny_bert():
+    """Build a minimal BERT model entirely from config (no download needed)."""
+    from transformers import BertConfig, BertForSequenceClassification
+
+    cfg = BertConfig(
+        vocab_size=64,
+        hidden_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        intermediate_size=64,
+        max_position_embeddings=16,
+        num_labels=2,
+    )
+    torch.manual_seed(0)
+    return BertForSequenceClassification(cfg)
+
+
+# ---------------------------------------------------------------------------
+# BERT support (inspector detects query/key/value nested in BertSelfAttention)
+# ---------------------------------------------------------------------------
+
+
+class TestBERTSupport:
+    def test_inspector_detects_layers(self):
+        from src.models.inspector import TransformerInspector
+
+        model = _tiny_bert()
+        inspector = TransformerInspector(model)
+        assert inspector.n_layers == 2
+
+    def test_inspector_detects_nested_qkv(self):
+        from src.models.inspector import TransformerInspector
+
+        model = _tiny_bert()
+        inspector = TransformerInspector(model)
+        info = inspector.layer_info(0)
+        assert info.q_mod is not None, "query not detected (nested in BertSelfAttention)"
+        assert info.k_mod is not None, "key not detected"
+        assert info.v_mod is not None, "value not detected"
+        assert info.qkv_mod is None, "should not have fused QKV"
+
+    def test_magnitude_scores_all_heads(self):
+        model = _tiny_bert()
+        scores = MagnitudePruner().score_heads(model)
+        assert len(scores) == 8  # 2 layers × 4 heads
+        assert all(v >= 0.0 for v in scores.values())
+
+    def test_prune_zeros_head_weights(self):
+        torch.manual_seed(0)
+        model = _tiny_bert()
+        pruner = MagnitudePruner()
+        mask = pruner.prune(model, sparsity=0.5)
+        assert len(mask) > 0
+        total_zeros = sum((m == 0).sum().item() for m in mask.values())
+        assert total_zeros > 0
+
+    def test_activation_pruner_with_data(self):
+        model = _tiny_bert()
+        data = _fake_dataloader(batch_size=2, seq_len=8, n_batches=2)
+        pruner = ActivationPruner()
+        scores = pruner.score_heads(model, dataloader=data)
+        assert len(scores) == 8
+        assert all(v >= 0.0 for v in scores.values())

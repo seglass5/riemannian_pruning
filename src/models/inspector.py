@@ -306,18 +306,22 @@ class TransformerInspector:
         # ── build LayerInfo list ──────────────────────────────────────
         layers: list[_LayerInfo] = []
         for idx, (attn_name, attn_mod) in enumerate(attn_mods):
-            # Detect Q / K / V / fused-QKV among DIRECT children of attn_mod
+            # Detect Q / K / V / fused-QKV within attn_mod (up to 2 levels deep).
+            # Searching two levels handles BERT-style nesting where query/key/value
+            # live inside BertSelfAttention which is a child of BertAttention.
             q_mod = k_mod = v_mod = qkv_mod = None
-            for child_name, child_mod in attn_mod.named_children():
-                cn = child_name.lower()
-                if cn in _Q_NAMES:
-                    q_mod = child_mod
-                elif cn in _K_NAMES:
-                    k_mod = child_mod
-                elif cn in _V_NAMES:
-                    v_mod = child_mod
-                elif cn in _QKV_NAMES:
-                    qkv_mod = child_mod
+            for rel_name, sub_mod in attn_mod.named_modules():
+                if not rel_name or rel_name.count(".") > 1:
+                    continue
+                cn = rel_name.split(".")[-1].lower()
+                if cn in _Q_NAMES and q_mod is None:
+                    q_mod = sub_mod
+                elif cn in _K_NAMES and k_mod is None:
+                    k_mod = sub_mod
+                elif cn in _V_NAMES and v_mod is None:
+                    v_mod = sub_mod
+                elif cn in _QKV_NAMES and qkv_mod is None:
+                    qkv_mod = sub_mod
 
             mlp_name = mlp_mods[idx][0] if idx < len(mlp_mods) else None
             mlp_mod = mlp_mods[idx][1] if idx < len(mlp_mods) else None

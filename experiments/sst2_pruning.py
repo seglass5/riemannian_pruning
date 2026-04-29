@@ -293,14 +293,29 @@ def _load_distilbert_classifier(device: str):
     return model, tokenizer
 
 
+def _load_bert_classifier(device: str):
+    """Load BertForSequenceClassification with 2 labels."""
+    from transformers import AutoTokenizer, BertForSequenceClassification
+
+    logger.info("Loading BERT-base sequence classifier …")
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    model = BertForSequenceClassification.from_pretrained(
+        "bert-base-uncased", num_labels=2
+    )
+    model = model.to(device)
+    return model, tokenizer
+
+
 def _load_model(model_arch: str, device: str):
     """Dispatch to the appropriate model loader."""
     if model_arch == "gpt2":
         return _load_gpt2_classifier(device)
     elif model_arch == "distilbert":
         return _load_distilbert_classifier(device)
+    elif model_arch == "bert":
+        return _load_bert_classifier(device)
     else:
-        raise ValueError(f"Unknown model_arch {model_arch!r}. Choose 'gpt2' or 'distilbert'.")
+        raise ValueError(f"Unknown model_arch {model_arch!r}. Choose 'gpt2', 'distilbert', or 'bert'.")
 
 
 # ---------------------------------------------------------------------------
@@ -901,8 +916,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="GLUE pruning sweep (SST-2 / CoLA / RTE)")
     parser.add_argument("--task", default="sst2", choices=["sst2", "cola", "rte", "both"],
                         help="Task to run: sst2, cola, rte, or both (default: sst2; 'both' runs sst2+cola)")
-    parser.add_argument("--model", default="gpt2", choices=["gpt2", "distilbert"],
-                        help="Model architecture: gpt2 or distilbert (default: gpt2)")
+    parser.add_argument("--model", default="gpt2", choices=["gpt2", "distilbert", "bert"],
+                        help="Model architecture: gpt2, distilbert, or bert (default: gpt2)")
     parser.add_argument("--n-seeds", type=int, default=1,
                         help="Number of random seeds to run and average over (default: 1)")
     parser.add_argument("--seed", type=int, default=42,

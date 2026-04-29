@@ -258,6 +258,19 @@ class HeadPruner(ABC):
                 return name
         return None
 
+    @staticmethod
+    def _find_rel_path(parent: nn.Module, target: nn.Module, max_depth: int = 2) -> Optional[str]:
+        """Return the dotted relative path from ``parent`` to ``target``.
+
+        Searches up to ``max_depth`` levels deep, so it handles both direct
+        children (GPT-2, DistilBERT) and nested modules (BERT's query/key/value
+        inside BertSelfAttention inside BertAttention).
+        """
+        for name, mod in parent.named_modules():
+            if mod is target and name and name.count(".") < max_depth:
+                return name
+        return None
+
     # ------------------------------------------------------------------
     # Mask construction
     # ------------------------------------------------------------------
@@ -335,10 +348,10 @@ class HeadPruner(ABC):
 
             # ── fused QKV (e.g. GPT-2 c_attn) ───────────────────────
             if layer_info.qkv_mod is not None:
-                child_name = self._find_child_name(attn_mod, layer_info.qkv_mod)
-                if child_name:
+                rel_path = self._find_rel_path(attn_mod, layer_info.qkv_mod)
+                if rel_path:
                     param = layer_info.qkv_mod.weight
-                    full = f"{attn_name}.{child_name}.weight"
+                    full = f"{attn_name}.{rel_path}.weight"
                     if _is_c1d(layer_info.qkv_mod):
                         masks[full] = _zero_cols_fused(param, heads_to_prune)
                     else:
@@ -349,29 +362,31 @@ class HeadPruner(ABC):
                 for proj_mod in (layer_info.q_mod, layer_info.k_mod, layer_info.v_mod):
                     if proj_mod is None:
                         continue
-                    child_name = self._find_child_name(attn_mod, proj_mod)
-                    if child_name is None:
+                    rel_path = self._find_rel_path(attn_mod, proj_mod)
+                    if rel_path is None:
                         continue
                     param = proj_mod.weight
-                    full = f"{attn_name}.{child_name}.weight"
+                    full = f"{attn_name}.{rel_path}.weight"
                     if _is_c1d(proj_mod):
                         masks[full] = _zero_cols(param, heads_to_prune)
                     else:
                         masks[full] = _zero_rows(param, heads_to_prune)
 
-            # ── output projection ────────────────────────────────────
-            for child_name, child_mod in attn_mod.named_children():
-                if child_name.lower() not in _O_PROJ_NAMES:
+            # ── output projection (search up to 2 levels deep) ───────
+            # Handles both direct children (GPT-2 c_proj, DistilBERT out_lin)
+            # and nested projections (BERT's output.dense inside BertAttention).
+            for rel_name, sub_mod in attn_mod.named_modules():
+                if not rel_name or rel_name.count(".") > 1:
                     continue
-                if not hasattr(child_mod, "weight") or child_mod.weight.dim() < 2:
+                if rel_name.split(".")[-1].lower() not in _O_PROJ_NAMES:
                     continue
-                full = f"{attn_name}.{child_name}.weight"
-                param = child_mod.weight
-                if _is_c1d(child_mod):
-                    # Conv1D c_proj: (in, out) — zero rows for each pruned head
+                if not hasattr(sub_mod, "weight") or sub_mod.weight.dim() < 2:
+                    continue
+                full = f"{attn_name}.{rel_name}.weight"
+                param = sub_mod.weight
+                if _is_c1d(sub_mod):
                     masks[full] = _zero_rows(param, heads_to_prune)
                 else:
-                    # Linear o_proj: (out, in) — zero cols for each pruned head
                     masks[full] = _zero_cols(param, heads_to_prune)
 
         return masks
