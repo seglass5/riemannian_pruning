@@ -402,6 +402,30 @@ def _prescore_ricci(model, calib_loader, device, n_batches, max_seq_len, task_na
     return pruner.score_heads(model, dataloader=list(calib_loader))
 
 
+def _layer_normalize_scores(scores: dict) -> dict:
+    """Normalize scores to [0, 1] within each layer, removing between-layer bias.
+
+    Ricci |Δκ| scores are systematically lower in early layers due to gradient
+    attenuation — the task-loss gradient weakens as it backpropagates through
+    many layers. This normalization preserves within-layer head ranking while
+    making the global ranking layer-agnostic.
+    """
+    from collections import defaultdict
+
+    by_layer: dict[int, list[tuple[int, float]]] = defaultdict(list)
+    for (li, hi), v in scores.items():
+        by_layer[li].append((hi, v))
+
+    result: dict[tuple[int, int], float] = {}
+    for li, pairs in by_layer.items():
+        vals = [v for _, v in pairs]
+        lo, hi_val = min(vals), max(vals)
+        rng = hi_val - lo
+        for hi, v in pairs:
+            result[(li, hi)] = (v - lo) / rng if rng > 0 else 0.5
+    return result
+
+
 def _apply_scores(model, scores: dict, sparsity: float) -> None:
     """Apply head mask derived from pre-computed scores to *model* in-place."""
     from src.pruning.head_pruners import MagnitudePruner
@@ -480,6 +504,7 @@ def run_sweep(
     seed: int = 42,
     return_scores: bool = False,
     invert_ricci: bool = False,
+    layer_normalize: bool = False,
 ):
     """Full fine-tune → pre-score → sweep → evaluate pipeline.
 
@@ -491,6 +516,8 @@ def run_sweep(
         model_arch: Model architecture — ``"gpt2"`` or ``"distilbert"``.
         n_train: Training examples.  Defaults to 1000 for SST-2/CoLA, 2000 for RTE.
         output: Output figure path.  Defaults to ``"<task>_results.png"``.
+        layer_normalize: If True, normalize Ricci scores within each layer before
+            global ranking, removing the between-layer gradient-attenuation bias.
         seed: Random seed for fine-tuning and data shuffling reproducibility.
         return_scores: If True, also return the raw importance-score dicts.
         invert_ricci: If True, also run an inverted-Ricci pruner that prunes
@@ -540,6 +567,10 @@ def run_sweep(
 
     logger.info("RandomPruner …")
     rand_scores = RandomPruner().score_heads(model)
+
+    if layer_normalize:
+        logger.info("Applying layer-wise score normalization to Ricci scores …")
+        ricci_scores = _layer_normalize_scores(ricci_scores)
 
     all_scores = {
         "magnitude": mag_scores,
@@ -947,6 +978,9 @@ def main() -> None:
                         help="Also compute and plot head prune-set overlap (Jaccard + heatmap)")
     parser.add_argument("--invert-ricci", action="store_true",
                         help="Also run inverted-Ricci (prune highest |Δκ| first) to test directional-inversion hypothesis")
+    parser.add_argument("--layer-normalize", action="store_true",
+                        help="Normalize Ricci scores within each layer before global ranking, "
+                             "removing between-layer gradient-attenuation bias")
     parser.add_argument("--device", default=None, help="Device (cpu/cuda)")
     args = parser.parse_args()
 
@@ -960,6 +994,7 @@ def main() -> None:
         max_seq_len=args.max_seq_len,
         device=args.device,
         invert_ricci=args.invert_ricci,
+        layer_normalize=args.layer_normalize,
     )
 
     if args.task == "both":

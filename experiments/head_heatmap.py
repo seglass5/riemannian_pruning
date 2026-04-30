@@ -74,6 +74,7 @@ def plot_heatmaps(
     task: str,
     sparsity: float = 0.5,
     invert_ricci: bool = False,
+    layer_normalize: bool = False,
     output: str | None = None,
 ) -> None:
     """Render the five-panel heatmap figure and save to *output*.
@@ -86,6 +87,8 @@ def plot_heatmaps(
         task: GLUE task string used only for the figure title.
         sparsity: Fraction of heads used for prune-set overlays and bar chart.
         invert_ricci: If True, use the ``"ricci_inv"`` prune set in panels 1 and 3.
+        layer_normalize: Reflected in figure title only; normalization is applied
+            upstream by ``run_sweep``.
         output: File path for the saved figure.  Defaults to
                 ``"<model_arch>_<task>_heatmap.png"``.
     """
@@ -238,13 +241,15 @@ def plot_heatmaps(
     ax_lp.legend(fontsize=8)
     ax_lp.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
 
+    ln_tag = "  [layer-normalised]" if layer_normalize else ""
     fig.suptitle(
-        f"{model_arch} — {task.upper()}  |  Layer × head importance heatmap",
+        f"{model_arch} — {task.upper()}  |  Layer × head importance heatmap{ln_tag}",
         fontsize=11, fontweight="bold", y=1.00,
     )
 
     if output is None:
-        output = f"{model_arch}_{task}_heatmap.png"
+        suffix = "_ln" if layer_normalize else ""
+        output = f"{model_arch}_{task}_heatmap{suffix}.png"
     out_path = Path(output)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     logger.info("Heatmap saved → %s", out_path.resolve())
@@ -288,6 +293,8 @@ def main() -> None:
     parser.add_argument("--max-seq-len", type=int, default=64)
     parser.add_argument("--output", default=None,
                         help="Output path (default: <model>_<task>_heatmap.png)")
+    parser.add_argument("--layer-normalize", action="store_true",
+                        help="Normalize Ricci scores within each layer before global ranking")
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
@@ -305,6 +312,7 @@ def main() -> None:
         seed=args.seed,
         return_scores=True,
         invert_ricci=args.invert_ricci,
+        layer_normalize=args.layer_normalize,
     )
 
     plot_heatmaps(
@@ -313,6 +321,7 @@ def main() -> None:
         task=args.task,
         sparsity=args.sparsity,
         invert_ricci=args.invert_ricci,
+        layer_normalize=args.layer_normalize,
         output=args.output,
     )
 

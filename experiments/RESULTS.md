@@ -480,7 +480,73 @@ The most likely explanation: in a 24-layer model, the very-lowest-|Δκ| heads (
 
 The Ricci advantage degrades monotonically with model depth/width: +12.3 pp → +3.2 pp → −12.5 pp relative to Random. The early-collapse pattern emerges at Medium and becomes permanent at Large, tracing the onset of head-importance concentration.
 
-### Script used
+---
+
+## 2026-04-30 — Heatmap observation: early-layer concentration
+
+### Finding
+
+Layer × head heatmaps (`experiments/head_heatmap.py`) reveal that at 50% sparsity,
+Ricci's prune set is heavily concentrated in the earliest layers (layers 0-1 are
+almost entirely pruned; later layers are barely touched).
+
+### Cause: gradient attenuation
+
+Ollivier–Ricci curvature delta is computed as |task_κ − base_κ|, where the
+task-conditioned κ is derived from attention matrices modulated by ∂L/∂A — the
+gradient of the task loss with respect to each attention weight. In deep networks,
+this gradient is attenuated by backpropagation through many layers before reaching
+the early layers. Early layers therefore receive systematically weaker gradient
+signals, producing consistently low |Δκ| regardless of actual head importance.
+This is a gradient depth-bias, not a genuine signal about head expendability.
+
+### Consequence
+
+- **GPT-2 base (12 layers)**: early layers are genuinely expendable — their
+  positional/syntactic patterns can be partially reconstructed by remaining heads,
+  and the 12-layer stack is shallow enough that removing them doesn't cascade.
+  The bias happens to point in the right direction.
+
+- **GPT-2 Medium (24 layers)** and **GPT-2 Large (36 layers)**: early layers
+  provide structural scaffolding for the deeper stack. Removing them first
+  causes cascading failures. This explains the early-sparsity collapse
+  (−21 pp at 20% for Medium; −25 pp at 10% for Large).
+
+### Fix: layer-normalized scoring
+
+`_layer_normalize_scores()` in `sst2_pruning.py` normalizes each head's score
+to [0, 1] within its layer before global ranking. This removes the between-layer
+gradient-attenuation bias while preserving within-layer discrimination (which
+heads in each layer are most/least task-responsive).
+
+Without normalization: the bottom-50% prune set concentrates in layers 0-1.
+With normalization: the bottom-50% prune set draws 50% from *every* layer,
+spreading pruning uniformly across depth.
+
+CLI flag: `--layer-normalize` in both `sst2_pruning.py` and `head_heatmap.py`.
+
+### Open question
+
+Does layer-normalized Ricci outperform the default for GPT-2 Medium and Large?
+If gradient attenuation was the root cause of the early-sparsity collapse,
+removing the bias should recover Ricci's accuracy advantage at greater depth.
+
+```bash
+# Compare default vs layer-normalized for GPT-2 Medium
+python -m experiments.sst2_pruning --model gpt2-medium --task sst2 \
+    --n-seeds 3 --max-train-steps 400 --n-train 2000
+
+python -m experiments.sst2_pruning --model gpt2-medium --task sst2 \
+    --n-seeds 3 --max-train-steps 400 --n-train 2000 --layer-normalize
+
+# Visualise the difference
+python -m experiments.head_heatmap --model gpt2 --task sst2 \
+    --max-train-steps 400 --n-train 2000
+python -m experiments.head_heatmap --model gpt2 --task sst2 \
+    --max-train-steps 400 --n-train 2000 --layer-normalize
+```
+
+### Scripts used
 
 ```bash
 python -m experiments.sst2_pruning --task sst2 --model gpt2-medium \
