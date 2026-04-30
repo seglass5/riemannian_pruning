@@ -40,6 +40,8 @@ the distillation process.
 
 ## 3. Mechanism: which heads get pruned?
 
+**Status**: ✅ implemented (`experiments/head_heatmap.py`)
+
 **Question**: are the Ricci-pruned (and Ricci_inv-pruned) heads structurally
 interpretable?
 
@@ -49,9 +51,11 @@ layers or head types (positional, syntactic, copy heads etc.). Cross-referencing
 with the known attention-head interpretability literature (Clark et al. 2019,
 Voita et al. 2019) would connect the geometric finding to functional roles.
 
-**Implementation**: extend `_plot_overlap` in `experiments/sst2_pruning.py`
-to compare forward-Ricci vs Ricci_inv prune sets, and add layer-position
-analysis (early vs late layers).
+**What was built**: `experiments/head_heatmap.py` — five-panel figure:
+(1) |Δκ| score heatmap with prune-set overlay, (2) Magnitude score heatmap,
+(3) 4-category comparison map (Ricci-only / Magnitude-only / Both / Neither),
+(4) mean score per layer line plot, (5) pruned-count per layer bar chart.
+Supports all five model architectures and `--invert-ricci` for bidirectional models.
 
 ---
 
@@ -124,7 +128,7 @@ DistilBERT SST-2 (wrong direction) are separable or interact.
 |-----------|--------|----------|
 | GPT-2 Medium/Large scaling | ✅ implemented | — |
 | BERT-base bidirectional bridge | ✅ implemented | — |
-| Head prune-set visualisation | not started | high |
+| Head prune-set visualisation | ✅ implemented | — |
 | Additive modulation | not started | medium |
 | Iterative pruning | not started | medium |
 | Auto-detect direction | not started | medium |
