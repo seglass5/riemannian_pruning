@@ -430,3 +430,37 @@ The Ricci advantage does not grow with scale. Instead, the curvature signal shif
 python experiments/sst2_pruning.py --task sst2 --model gpt2-large \
     --n-seeds 3 --invert-ricci
 ```
+
+---
+
+## 2026-04-29 — GPT-2 Medium SST-2 (failed: training instability)
+
+### Setup
+
+- **Model**: GPT-2 Medium (`GPT2ForSequenceClassification`, 355M, 24 layers × 16 heads = 384 heads)
+- **Training**: default budget (100 steps, 1000 examples), seeds 42/43/44, `--invert-ricci`
+
+### Results (uninformative — high-variance baseline)
+
+| Sparsity | Magnitude | Activation | Ricci | Random | Ricci_inv |
+|----------|-----------|------------|-------|--------|-----------|
+| 0%  | 0.780 ±0.169 | 0.780 ±0.169 | 0.780 ±0.169 | 0.780 ±0.169 | 0.780 ±0.169 |
+| 10% | 0.713 ±0.187 | 0.737 ±0.183 | 0.670 ±0.095 | 0.748 ±0.171 | 0.777 ±0.175 |
+| 20% | 0.708 ±0.187 | 0.713 ±0.185 | 0.572 ±0.109 | 0.753 ±0.133 | 0.748 ±0.181 |
+| 30% | 0.722 ±0.188 | 0.628 ±0.126 | 0.628 ±0.137 | 0.700 ±0.097 | 0.765 ±0.179 |
+| 40% | 0.745 ±0.191 | 0.633 ±0.126 | 0.638 ±0.117 | 0.653 ±0.135 | 0.725 ±0.155 |
+| 50% | 0.688 ±0.170 | 0.547 ±0.060 | 0.612 ±0.136 | 0.570 ±0.094 | 0.597 ±0.100 |
+
+> ⚠ **Results are not interpretable.** Baseline std ±0.169 indicates training instability across seeds, not pruning noise. Two diagnostic signs: (1) Medium's baseline (0.780) is *below* GPT-2 base (0.822) — physically wrong for a stronger pre-trained model; (2) ±2σ CI spans nearly the full useful accuracy range above majority class (~0.5). One or more seeds failed to converge and plateaued near majority-class accuracy.
+
+### Diagnosis
+
+The default training budget (100 steps, 1000 examples) is right on the convergence edge for a 355M model at lr=2e-5. GPT-2 base (117M) converged reliably at this budget; GPT-2 Large (774M) converged because it starts from a stronger pre-trained representation that requires fewer gradient steps to adapt. GPT-2 Medium occupies an intermediate position where convergence is seed-dependent at 100 steps.
+
+### Rerun required
+
+```bash
+python -m experiments.sst2_pruning --task sst2 --model gpt2-medium \
+    --n-seeds 3 --invert-ricci \
+    --max-train-steps 400 --n-train 2000
+```
