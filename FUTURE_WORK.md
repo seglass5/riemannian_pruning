@@ -17,9 +17,10 @@ than GPT-2 base (117M, 12 layers × 12 heads). Deeper causal models should
 produce stronger curvature variation across heads, making the geometric signal
 more discriminating.
 
-A scaling curve (117M → 355M → 774M) would make the result more practically
-relevant and show whether the Ricci advantage is robust or diminishes as
-magnitude-based methods also gain more signal from larger weight variance.
+A scaling curve (117M → 355M → 774M) was run and shows the Ricci advantage
+degrades monotonically: +12.3 pp over Random at base → +3.2 pp at Medium →
+−12.5 pp at Large. The scaling hypothesis is reversed — the concentration of
+head importance at scale makes Random the best pruner for GPT-2 Large.
 
 ---
 

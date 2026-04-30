@@ -433,31 +433,54 @@ python experiments/sst2_pruning.py --task sst2 --model gpt2-large \
 
 ---
 
-## 2026-04-29 — GPT-2 Medium SST-2 (failed: training instability)
+## 2026-04-29 — GPT-2 Medium SST-2 sparsity sweep
 
 ### Setup
 
-- **Model**: GPT-2 Medium (`GPT2ForSequenceClassification`, 355M, 24 layers × 16 heads = 384 heads)
-- **Training**: default budget (100 steps, 1000 examples), seeds 42/43/44, `--invert-ricci`
+- **Model**: GPT-2 Medium (`GPT2ForSequenceClassification`, 355M, 24 layers × 16 heads = 384 heads total)
+- **Fine-tuning**: AdamW, lr=2e-5, gradient clipping 1.0
+- **Training**: 400 steps, 2000 examples, seeds 42/43/44 (3 seeds), `--invert-ricci`
+- **Calibration / eval**: 80 / 200 validation examples
+- **Majority-class baseline**: ~50% (balanced binary)
 
-### Results (uninformative — high-variance baseline)
+> Initial run with default budget (100 steps, 1000 examples) produced baseline std ±0.169 due to training instability; those results are discarded. Re-run with the GPT-2 base protocol (400 steps, 2000 examples) converged cleanly to 0.905 ±0.000.
+
+### Results (multi-seed, mean ± std)
 
 | Sparsity | Magnitude | Activation | Ricci | Random | Ricci_inv |
 |----------|-----------|------------|-------|--------|-----------|
-| 0%  | 0.780 ±0.169 | 0.780 ±0.169 | 0.780 ±0.169 | 0.780 ±0.169 | 0.780 ±0.169 |
-| 10% | 0.713 ±0.187 | 0.737 ±0.183 | 0.670 ±0.095 | 0.748 ±0.171 | 0.777 ±0.175 |
-| 20% | 0.708 ±0.187 | 0.713 ±0.185 | 0.572 ±0.109 | 0.753 ±0.133 | 0.748 ±0.181 |
-| 30% | 0.722 ±0.188 | 0.628 ±0.126 | 0.628 ±0.137 | 0.700 ±0.097 | 0.765 ±0.179 |
-| 40% | 0.745 ±0.191 | 0.633 ±0.126 | 0.638 ±0.117 | 0.653 ±0.135 | 0.725 ±0.155 |
-| 50% | 0.688 ±0.170 | 0.547 ±0.060 | 0.612 ±0.136 | 0.570 ±0.094 | 0.597 ±0.100 |
+| 0%  | 0.905 ±0.000 | 0.905 ±0.000 | 0.905 ±0.000 | 0.905 ±0.000 | 0.905 ±0.000 |
+| 10% | 0.887 ±0.013 | 0.883 ±0.003 | 0.820 ±0.005 | **0.893 ±0.003** | 0.858 ±0.030 |
+| 20% | 0.865 ±0.052 | 0.858 ±0.028 | 0.693 ±0.033 | **0.885 ±0.009** | 0.825 ±0.044 |
+| 30% | 0.818 ±0.053 | 0.802 ±0.065 | 0.788 ±0.008 | **0.862 ±0.016** | 0.707 ±0.112 |
+| 40% | **0.822 ±0.031** | 0.657 ±0.144 | 0.787 ±0.014 | 0.755 ±0.129 | 0.625 ±0.112 |
+| 50% | 0.723 ±0.063 | 0.573 ±0.071 | **0.755 ±0.023** | 0.723 ±0.157 | 0.570 ±0.061 |
 
-> ⚠ **Results are not interpretable.** Baseline std ±0.169 indicates training instability across seeds, not pruning noise. Two diagnostic signs: (1) Medium's baseline (0.780) is *below* GPT-2 base (0.822) — physically wrong for a stronger pre-trained model; (2) ±2σ CI spans nearly the full useful accuracy range above majority class (~0.5). One or more seeds failed to converge and plateaued near majority-class accuracy.
+**Ranking at 50% sparsity: Ricci (0.755) > Magnitude (0.723) ≈ Random (0.723) > Activation (0.573) ≈ Ricci_inv (0.570).**
 
-### Diagnosis
+### Observations
 
-The default training budget (100 steps, 1000 examples) is right on the convergence edge for a 355M model at lr=2e-5. GPT-2 base (117M) converged reliably at this budget; GPT-2 Large (774M) converged because it starts from a stronger pre-trained representation that requires fewer gradient steps to adapt. GPT-2 Medium occupies an intermediate position where convergence is seed-dependent at 100 steps.
+**Medium is the transitional regime.** Ricci wins at 50% sparsity (0.755 ±0.023) but the margin over Random has narrowed to 3.2 pp (from 12.3 pp at base). Random dominates at low-to-mid sparsity (0.893, 0.885, 0.862 at 10-30%) before collapsing with high variance at 40-50%. The pattern is intermediate between GPT-2 base (Ricci wins cleanly at all levels) and Large (Random wins at all levels).
 
-### Rerun required
+**Ricci shows non-monotonic early collapse.** At 10% sparsity Ricci drops 8.5 pp; at 20% it drops 21.2 pp — worse than any other method including Random (which loses only 2 pp). It then recovers: 0.788 at 30%, 0.787 at 40%, 0.755 at 50%. This non-monotonic curve does not appear in GPT-2 base.
+
+The most likely explanation: in a 24-layer model, the very-lowest-|Δκ| heads (bottom 10-20% of the distribution) include structural scaffolding heads that GPT-2 base doesn't need — positional encoding anchors, inter-layer communication pathways, or similar stable repeated patterns required to maintain representational integrity across greater depth. These are the first heads Ricci removes and they are critical. As sparsity grows, the prune set expands into genuinely expendable heads and Ricci's signal recovers. In GPT-2 base (12 layers), no such structural scaffolding is required, so the lowest-|Δκ| heads are genuinely inert.
+
+**Ricci_inv (causal direction) fails as expected** (0.570 at 50%), confirming the causal attention direction (preserve high |Δκ|) remains correct for Medium.
+
+**Activation collapses badly** (0.573 ±0.071 at 50%), worse than Ricci_inv. This is more severe than the GPT-2 base pattern and suggests the V-projection activation signal is poorly calibrated at 24-layer depth with the same calibration budget.
+
+### Complete GPT-2 scaling comparison ✓
+
+| Model | Heads | Baseline | Ricci at 50% | Random at 50% | Ricci vs Random | Ricci early collapse? |
+|-------|-------|----------|--------------|---------------|----------------|-----------------------|
+| GPT-2 base | 144 | 0.822 ±0.032 | **0.720 ±0.005** | 0.597 ±0.116 | +12.3 pp | No — Ricci best at all levels |
+| GPT-2 Medium | 384 | 0.905 ±0.000 | **0.755 ±0.023** | 0.723 ±0.157 | +3.2 pp | Yes — −21 pp at 20%, recovers by 30% |
+| GPT-2 Large | 720 | 0.915 ±0.017 | 0.725 ±0.035 | **0.850 ±0.031** | −12.5 pp | Yes — −25 pp at 10%, never recovers |
+
+The Ricci advantage degrades monotonically with model depth/width: +12.3 pp → +3.2 pp → −12.5 pp relative to Random. The early-collapse pattern emerges at Medium and becomes permanent at Large, tracing the onset of head-importance concentration.
+
+### Script used
 
 ```bash
 python -m experiments.sst2_pruning --task sst2 --model gpt2-medium \
