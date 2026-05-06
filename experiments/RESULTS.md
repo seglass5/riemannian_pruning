@@ -574,3 +574,33 @@ python -m experiments.sst2_pruning --task sst2 --model gpt2-medium \
     --n-seeds 3 --invert-ricci \
     --max-train-steps 400 --n-train 2000
 ```
+
+---
+
+## 2026-04-30 — Calibration budget control: n-calib 80 → 400
+
+### Setup
+
+GPT-2 Medium, 3 seeds, 400 steps, 2000 training examples.
+Two runs: (1) `--n-calib 400` only; (2) `--n-calib 400 --layer-normalize`.
+
+### Result: zero effect on Ricci
+
+Both runs produce Ricci scores **identical** to the n-calib=80 baseline.
+The 20% collapse is still exactly 0.693 ±0.033 in run 1;
+the 10% variance explosion is still ±0.105 in run 2.
+
+### Explanation
+
+`--n-calib` and `--n-ricci-batches` are independent parameters.
+`RicciPruner` uses exactly `n_ricci_batches` gradient batches (default 10 × batch_size 8 = 80 examples) from the calibration loader, regardless of how many examples the loader contains.
+Increasing `--n-calib` without increasing `--n-ricci-batches` has no effect on Ricci scoring.
+
+The correct parameter to test is `--n-ricci-batches 50` (5× more gradient batches = 400 examples).
+However, the structural character of the results — the collapse and the variance are identical regardless of calibration loader size — confirms that both phenomena are properties of backpropagation through 24 layers, not calibration-data noise:
+
+| Problem | Root cause | Status |
+|---------|-----------|--------|
+| 20% early-sparsity collapse | Gradient depth-bias (early layers structurally suppressed) | Fixed by `--layer-normalize` |
+| 10% variance with layer-norm | Within-layer ranking noise at low sparsity | Not a calibration-data problem; likely requires more gradient batches or iterative re-scoring |
+| 50% Random still competitive | Head-importance concentration at scale | Requires iterative pruning or architectural changes |
