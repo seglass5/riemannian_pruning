@@ -1,5 +1,7 @@
 # riemannian-pruning
 
+This is a continuation and extension of my previous work on RicciNets to transformer architectures. I am interested in efficiency gains of transformer models, as well as mechanistic interpretability.
+
 Geometry-informed, capability-targeted pruning of transformer models.
 
 ## Overview
