@@ -1,0 +1,25 @@
+run_name: bert-base-magnitude-30pct
+log_level: INFO
+
+model:
+  name: bert-base-uncased
+  device: cpu          # change to "cuda" when available
+  dtype: float32
+
+pruning:
+  method: magnitude    # "magnitude" | "geometry"
+  sparsity: 0.30
+
+  # geometry-specific options (used when method: geometry)
+  max_seq_len: 128
+  dataset: wikitext
+  n_calibration: 32
+
+eval:
+  batch_size: 4
+  max_length: 512
+  n_eval_samples: 50
+
+wandb:
+  enabled: false
+  project: riemannian-pruning
