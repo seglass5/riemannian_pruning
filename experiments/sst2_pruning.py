@@ -686,19 +686,19 @@ def run_iterative_sweep(
     baseline_acc = evaluate_accuracy(model, eval_loader, device)
     logger.info("Iterative sweep — baseline: %.3f", baseline_acc)
 
-    # One independent model per pruner
-    models: dict[str, torch.nn.Module] = {
-        name: copy.deepcopy(model) for name in _ITERATIVE_PRUNERS
-    }
+    # Process one pruner at a time to avoid holding N model copies simultaneously.
+    # For large models (GPT-2 Medium/Large) keeping 4 copies + optimizer states OOMs.
     results: dict[str, dict[float, float]] = {
         name: {0.0: baseline_acc} for name in _ITERATIVE_PRUNERS
     }
 
-    for target_s in [s for s in SPARSITIES if s > 0.0]:
-        logger.info("=== Iterative round — target %.0f%% ===", target_s * 100)
-        for pname in _ITERATIVE_PRUNERS:
-            m = models[pname]
+    sparsity_steps = [s for s in SPARSITIES if s > 0.0]
 
+    for pname in _ITERATIVE_PRUNERS:
+        logger.info("=== Iterative pruner: %s ===", pname)
+        m = copy.deepcopy(model)
+
+        for target_s in sparsity_steps:
             if pname == "ricci":
                 scores = _prescore_ricci(
                     m, calib_loader, device,
@@ -720,6 +720,10 @@ def run_iterative_sweep(
             acc = evaluate_accuracy(m, eval_loader, device)
             results[pname][target_s] = acc
             logger.info("  %s @ %.0f%%: %.3f", pname, target_s * 100, acc)
+
+        del m
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     _plot_results(
         results, baseline_acc, output, task=task, model_arch=model_arch,
