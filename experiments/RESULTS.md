@@ -604,3 +604,56 @@ However, the structural character of the results — the collapse and the varian
 | 20% early-sparsity collapse | Gradient depth-bias (early layers structurally suppressed) | Fixed by `--layer-normalize` |
 | 10% variance with layer-norm | Within-layer ranking noise at low sparsity | Not a calibration-data problem; likely requires more gradient batches or iterative re-scoring |
 | 50% Random still competitive | Head-importance concentration at scale | Requires iterative pruning or architectural changes |
+
+---
+
+## 2026-05-11 — Iterative pruning: GPT-2 base
+
+### Setup
+
+- **Model**: GPT-2 base (117M, 12 layers × 12 heads = 144 heads)
+- **Protocol**: 5 rounds at sparsity steps 10/20/30/40/50%; at each round: re-score current model → apply cumulative prune set → 50 fine-tuning steps → evaluate
+- **Initial fine-tuning**: 400 steps, 2000 examples, seeds 42/43/44 (3 seeds)
+- **Pruners**: Magnitude, Activation, Ricci, Random (no Ricci_inv — causal model)
+
+### Results (multi-seed, mean ± std)
+
+| Sparsity | Magnitude | Activation | Ricci | Random |
+|----------|-----------|------------|-------|--------|
+| 0%  | 0.822 ±0.032 | 0.822 ±0.032 | 0.822 ±0.032 | 0.822 ±0.032 |
+| 10% | 0.758 ±0.031 | 0.758 ±0.059 | 0.755 ±0.015 | **0.820 ±0.023** |
+| 20% | **0.810 ±0.015** | 0.768 ±0.031 | 0.752 ±0.050 | 0.778 ±0.037 |
+| 30% | **0.805 ±0.018** | 0.772 ±0.053 | 0.755 ±0.040 | 0.725 ±0.038 |
+| 40% | **0.805 ±0.026** | 0.717 ±0.035 | 0.748 ±0.028 | 0.682 ±0.032 |
+| 50% | **0.743 ±0.082** | 0.715 ±0.048 | 0.732 ±0.068 | 0.728 ±0.003 |
+
+### Comparison: one-shot vs iterative at 50% sparsity
+
+| Method | One-shot 50% | Iterative 50% | Δ |
+|--------|-------------|---------------|---|
+| Ricci | **0.720 ±0.005** | 0.732 ±0.068 | +1.2 pp, variance ×14 |
+| Magnitude | 0.568 ±0.067 | **0.743 ±0.082** | **+17.5 pp** |
+| Random | 0.597 ±0.116 | 0.728 ±0.003 | +13.1 pp |
+| Activation | 0.653 ±0.026 | 0.715 ±0.048 | +6.2 pp |
+
+### Observations
+
+**Iterative pruning equalises all methods.** By giving each pruner 50 fine-tuning recovery steps between rounds, even weak one-shot methods (Magnitude, Random) close most of the gap to Ricci. At 50% sparsity all four methods cluster between 0.715 and 0.743 with overlapping CIs — the pruning criterion has become secondary.
+
+**Ricci's advantage is a one-shot phenomenon.** Ricci improved only +1.2 pp iteratively because it was already near-optimal one-shot. Magnitude improved +17.5 pp and Random +13.1 pp because recovery fine-tuning compensates for their inferior one-shot decisions. The fine-tuning between rounds effectively hides the cost of misranking.
+
+**Ricci's variance explodes iteratively** (±0.005 one-shot → ±0.068 iterative). One-shot Ricci consistently identifies the same task-irrelevant heads across seeds; iterative re-scoring produces noisier rankings because each round's fine-tuning reshapes the gradient landscape differently per seed.
+
+**Magnitude wins at 30–40% iteratively** (0.805 vs Ricci 0.755). Weight-norm ranking becomes more reliable in an iterative regime: after each fine-tuning step, the model consolidates around kept heads, making weight magnitude a better proxy for importance at the next round. This is the opposite pattern to one-shot, where Ricci dominated at all sparsity levels.
+
+**Random wins at 10%** (0.820 ±0.023 ≈ baseline). The same dominance seen in GPT-2 Large one-shot, now appearing at base scale under iterative conditions. With only 10% of heads removed and 50 recovery steps, any pruning criterion is near-trivially survived.
+
+**Key finding**: iterative pruning with per-round fine-tuning does not improve upon one-shot Ricci for GPT-2 base at 50% sparsity (0.732 iterative vs 0.720 one-shot, within noise). It benefits poor one-shot methods far more than good ones, making the pruning signal secondary to the recovery budget.
+
+### Script used
+
+```bash
+python -m experiments.sst2_pruning --model gpt2 --task sst2 \
+    --n-seeds 3 --iterative \
+    --max-train-steps 400 --n-train 2000
+```
