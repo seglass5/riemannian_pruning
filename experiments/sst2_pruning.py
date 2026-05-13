@@ -637,12 +637,141 @@ def run_multi_seed(
     return accum
 
 
+# ---------------------------------------------------------------------------
+# Iterative pruning
+# ---------------------------------------------------------------------------
+
+_ITERATIVE_PRUNERS = ["magnitude", "activation", "ricci", "random"]
+
+
+def run_iterative_sweep(
+    task: str = "sst2",
+    model_arch: str = "gpt2",
+    max_train_steps: int = 100,
+    n_train: int | None = None,
+    n_calib: int = 80,
+    n_eval: int = 200,
+    n_ricci_batches: int = 10,
+    max_seq_len: int = 64,
+    output: str | None = None,
+    device: str | None = None,
+    seed: int = 42,
+    finetune_steps_per_round: int = 50,
+    layer_normalize: bool = False,
+) -> dict[str, dict[float, float]]:
+    """Iterative prune → re-score → fine-tune loop.
+
+    Maintains one model copy per pruner.  At each sparsity step the current
+    model is re-scored, the cumulative prune set for that target sparsity is
+    applied, and the model fine-tunes for *finetune_steps_per_round* steps
+    before evaluation.  Previously-zeroed heads score near zero and stay
+    pruned across rounds.
+
+    Returns ``pruner_name → sparsity → accuracy``.
+    """
+    torch.manual_seed(seed)
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if n_train is None:
+        n_train = 2000 if task == "rte" else 1000
+    if output is None:
+        output = f"{task}_{model_arch}_iterative.png"
+
+    model, tokenizer = _load_model(model_arch, device)
+    train_loader, calib_loader, eval_loader = _build_loaders_for_task(
+        task, tokenizer, n_train=n_train, n_calib=n_calib, n_eval=n_eval, batch_size=8
+    )
+
+    fine_tune(model, train_loader, max_steps=max_train_steps, device=device)
+    baseline_acc = evaluate_accuracy(model, eval_loader, device)
+    logger.info("Iterative sweep — baseline: %.3f", baseline_acc)
+
+    # Process one pruner at a time to avoid holding N model copies simultaneously.
+    # For large models (GPT-2 Medium/Large) keeping 4 copies + optimizer states OOMs.
+    results: dict[str, dict[float, float]] = {
+        name: {0.0: baseline_acc} for name in _ITERATIVE_PRUNERS
+    }
+
+    sparsity_steps = [s for s in SPARSITIES if s > 0.0]
+
+    for pname in _ITERATIVE_PRUNERS:
+        logger.info("=== Iterative pruner: %s ===", pname)
+        m = copy.deepcopy(model)
+
+        for target_s in sparsity_steps:
+            if pname == "ricci":
+                scores = _prescore_ricci(
+                    m, calib_loader, device,
+                    n_batches=n_ricci_batches,
+                    max_seq_len=max_seq_len,
+                    task_name=task,
+                )
+                if layer_normalize:
+                    scores = _layer_normalize_scores(scores)
+            elif pname == "activation":
+                scores = _prescore_activation(m, calib_loader, device)
+            elif pname == "magnitude":
+                scores = MagnitudePruner().score_heads(m)
+            else:  # random
+                scores = RandomPruner().score_heads(m)
+
+            _apply_scores(m, scores, target_s)
+            fine_tune(m, train_loader, max_steps=finetune_steps_per_round, device=device)
+            acc = evaluate_accuracy(m, eval_loader, device)
+            results[pname][target_s] = acc
+            logger.info("  %s @ %.0f%%: %.3f", pname, target_s * 100, acc)
+
+        del m
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    _plot_results(
+        results, baseline_acc, output, task=task, model_arch=model_arch,
+        title_suffix=f" — iterative ({finetune_steps_per_round} steps/round)",
+    )
+    return results
+
+
+def run_iterative_multi_seed(
+    n_seeds: int = 3,
+    base_seed: int = 42,
+    task: str = "sst2",
+    model_arch: str = "gpt2",
+    output: str | None = None,
+    **sweep_kwargs,
+) -> dict[str, dict[float, list[float]]]:
+    """Run :func:`run_iterative_sweep` for *n_seeds* seeds and aggregate.
+
+    Returns ``pruner_name → sparsity → [accuracy per seed]``.
+    """
+    accum: dict[str, dict[float, list[float]]] = {}
+
+    for i in range(n_seeds):
+        seed = base_seed + i
+        logger.info("======  Iterative seed %d/%d  (seed=%d)  ======", i + 1, n_seeds, seed)
+        results = run_iterative_sweep(task=task, model_arch=model_arch, seed=seed, output=None, **sweep_kwargs)
+        for name, sparsity_acc in results.items():
+            if name not in accum:
+                accum[name] = {s: [] for s in SPARSITIES}
+            for sparsity in SPARSITIES:
+                accum[name][sparsity].append(sparsity_acc[sparsity])
+
+    if output is None:
+        output = f"{task}_{model_arch}_iterative_multiseed.png"
+    _plot_results_multi_seed(
+        accum, output, task=task, model_arch=model_arch, n_seeds=n_seeds,
+        title_suffix=" (iterative)",
+    )
+    return accum
+
+
 def _plot_results(
     results: dict[str, dict[float, float]],
     baseline_acc: float,
     output: str,
     task: str = "sst2",
     model_arch: str = "gpt2",
+    title_suffix: str = "",
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -675,7 +804,8 @@ def _plot_results(
     model_label = {"gpt2": "GPT-2", "distilbert": "DistilBERT"}.get(model_arch, model_arch)
     ax.set_title(
         f"Classification accuracy vs head sparsity\n"
-        f"{model_label} fine-tuned on {task.upper()} — Magnitude / Activation / Ricci / Random",
+        f"{model_label} fine-tuned on {task.upper()} — Magnitude / Activation / Ricci / Random"
+        f"{title_suffix}",
         fontsize=11,
     )
     ax.legend(fontsize=11)
@@ -694,6 +824,7 @@ def _plot_results_multi_seed(
     task: str = "sst2",
     model_arch: str = "gpt2",
     n_seeds: int = 3,
+    title_suffix: str = "",
 ) -> None:
     """Plot mean ± 1 std accuracy vs sparsity across seeds."""
     try:
@@ -730,7 +861,8 @@ def _plot_results_multi_seed(
     model_label = {"gpt2": "GPT-2", "distilbert": "DistilBERT"}.get(model_arch, model_arch)
     ax.set_title(
         f"Classification accuracy vs head sparsity (mean ± 1 std, n={n_seeds} seeds)\n"
-        f"{model_label} fine-tuned on {task.upper()} — Magnitude / Activation / Ricci / Random",
+        f"{model_label} fine-tuned on {task.upper()} — Magnitude / Activation / Ricci / Random"
+        f"{title_suffix}",
         fontsize=11,
     )
     ax.legend(fontsize=11)
@@ -981,6 +1113,10 @@ def main() -> None:
     parser.add_argument("--layer-normalize", action="store_true",
                         help="Normalize Ricci scores within each layer before global ranking, "
                              "removing between-layer gradient-attenuation bias")
+    parser.add_argument("--iterative", action="store_true",
+                        help="Run iterative prune→re-score→fine-tune loop instead of one-shot sweep")
+    parser.add_argument("--finetune-steps-per-round", type=int, default=50,
+                        help="Fine-tuning steps between pruning rounds in --iterative mode (default: 50)")
     parser.add_argument("--device", default=None, help="Device (cpu/cuda)")
     args = parser.parse_args()
 
@@ -997,7 +1133,35 @@ def main() -> None:
         layer_normalize=args.layer_normalize,
     )
 
-    if args.task == "both":
+    if args.iterative:
+        iterative_kwargs = dict(
+            model_arch=args.model,
+            max_train_steps=args.max_train_steps,
+            n_train=args.n_train,
+            n_calib=args.n_calib,
+            n_eval=args.n_eval,
+            n_ricci_batches=args.n_ricci_batches,
+            max_seq_len=args.max_seq_len,
+            device=args.device,
+            layer_normalize=args.layer_normalize,
+            finetune_steps_per_round=args.finetune_steps_per_round,
+        )
+        if args.n_seeds > 1:
+            accum = run_iterative_multi_seed(
+                n_seeds=args.n_seeds,
+                base_seed=args.seed,
+                task=args.task,
+                output=args.output,
+                **iterative_kwargs,
+            )
+            _print_table_multi_seed(args.task, accum)
+        else:
+            results = run_iterative_sweep(
+                task=args.task, seed=args.seed, output=args.output, **iterative_kwargs
+            )
+            _print_table(args.task, results)
+
+    elif args.task == "both":
         results_by_task: dict[str, dict[str, dict[float, float]]] = {}
         baselines: dict[str, float] = {}
 
