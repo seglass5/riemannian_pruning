@@ -80,6 +80,8 @@ both GPT-2 and DistilBERT.
 
 ## 5. Iterative pruning
 
+**Status**: ✅ implemented (`--iterative` flag, `--finetune-steps-per-round`)
+
 **Question**: does Ricci's structural signal hold across multiple prune-retrain
 rounds?
 
@@ -88,9 +90,14 @@ One-shot scoring at 50% sparsity is aggressive. Iterative pruning (prune 10%
 several accuracy points and would show whether the curvature delta remains
 informative as the model adapts to earlier pruning decisions.
 
-**Implementation**: add `--iterative` flag and `n_rounds` parameter to
-`run_sweep`. Each round calls `fine_tune` for a small number of steps then
-re-scores.
+**What was found**: Ricci's advantage is a one-shot phenomenon. At GPT-2 base,
+all methods cluster within 2.8 pp iteratively at 50% (Magnitude wins at 30–40%).
+At GPT-2 Medium, iterative pruning *reverses* the winner: Ricci wins one-shot
+(0.755) but Magnitude dominates iteratively (0.858, +7.8 pp). Fine-tuning
+between rounds compensates for poor one-shot decisions and additionally
+strengthens the weight-magnitude / importance correlation — more so at larger
+scale. The Ricci 20% collapse persists iteratively at Medium even after 50
+recovery steps per round.
 
 ---
 
@@ -130,6 +137,6 @@ DistilBERT SST-2 (wrong direction) are separable or interact.
 | BERT-base bidirectional bridge | ✅ implemented | — |
 | Head prune-set visualisation | ✅ implemented | — |
 | Additive modulation | not started | medium |
-| Iterative pruning | not started | medium |
+| Iterative pruning | ✅ implemented | — |
 | Auto-detect direction | not started | medium |
 | DistilBERT Ricci_inv on CoLA | not started | low |

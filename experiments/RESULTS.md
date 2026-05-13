@@ -657,3 +657,56 @@ python -m experiments.sst2_pruning --model gpt2 --task sst2 \
     --n-seeds 3 --iterative \
     --max-train-steps 400 --n-train 2000
 ```
+
+---
+
+## 2026-05-13 — Iterative pruning: GPT-2 Medium
+
+### Setup
+
+- **Model**: GPT-2 Medium (355M, 24 layers × 16 heads = 384 heads)
+- **Protocol**: 5 rounds at sparsity steps 10/20/30/40/50%; at each round: re-score current model → apply cumulative prune set → 50 fine-tuning steps → evaluate
+- **Initial fine-tuning**: 400 steps, 2000 examples, seeds 42/43/44 (3 seeds)
+- **Pruners**: Magnitude, Activation, Ricci, Random
+
+### Results (multi-seed, mean ± std)
+
+| Sparsity | Magnitude | Activation | Ricci | Random |
+|----------|-----------|------------|-------|--------|
+| 0%  | 0.905 ±0.000 | 0.905 ±0.000 | 0.905 ±0.000 | 0.905 ±0.000 |
+| 10% | 0.873 ±0.040 | 0.855 ±0.031 | 0.833 ±0.038 | **0.878 ±0.024** |
+| 20% | **0.892 ±0.012** | 0.860 ±0.026 | 0.755 ±0.039 | 0.878 ±0.033 |
+| 30% | **0.870 ±0.035** | 0.735 ±0.134 | 0.808 ±0.023 | 0.798 ±0.021 |
+| 40% | **0.868 ±0.064** | 0.832 ±0.040 | 0.770 ±0.069 | 0.800 ±0.028 |
+| 50% | **0.858 ±0.033** | 0.720 ±0.031 | 0.780 ±0.031 | 0.753 ±0.021 |
+
+### Comparison: one-shot vs iterative at 50% sparsity
+
+| Method | One-shot 50% | Iterative 50% | Δ |
+|--------|-------------|---------------|---|
+| Ricci | 0.755 ±0.023 | 0.780 ±0.031 | +2.5 pp |
+| Magnitude | 0.723 ±0.063 | **0.858 ±0.033** | **+13.5 pp** |
+| Random | 0.723 ±0.157 | 0.753 ±0.021 | +3.0 pp |
+| Activation | 0.573 ±0.071 | 0.720 ±0.031 | +14.7 pp |
+
+### Observations
+
+**Iterative pruning reverses the winner at Medium scale.** Ricci wins one-shot at 50% (0.755 vs Magnitude 0.723), but Magnitude dominates iteratively (0.858 vs Ricci 0.780, +7.8 pp gap). The reversal is more pronounced than at base, where the iterative winner margin was only +1.1 pp. This is consistent with a weight-magnitude / head-importance correlation that strengthens with model scale: in larger models, low-magnitude heads are genuinely redundant, and round-by-round fine-tuning consolidates this correlation further.
+
+**The Ricci 20% collapse persists iteratively.** One-shot Ricci at 20%: 0.693 ±0.033. Iterative Ricci at 20%: 0.755 ±0.039 (+6.2 pp recovery). Despite 50 fine-tuning steps after round 1 (10% pruned), re-scoring the adapted model still produces the same depth-bias-driven collapse at round 2. The gradient depth-bias affects the adapted model too — backpropagation through 24 layers still attenuates ∂L/∂A in early layers, so Ricci still over-prunes them at 20%. Layer normalization is needed to fix this iteratively as well.
+
+**Ricci partially recovers at 30%** (0.808 ±0.023) — second only to Magnitude (0.870). Once the prune set has expanded past the structural scaffolding heads that caused the 20% collapse, Ricci's signal recovers. The same non-monotonic curve seen one-shot (collapse at 10-20%, recovery at 30-50%) reappears iteratively.
+
+**Magnitude wins at every sparsity level ≥ 20% iteratively** — a pattern not seen at base scale (where Magnitude only led at 30-40%). This extended dominance across all levels suggests that at 24-layer depth, weight magnitude is a more stable proxy for head importance than curvature delta, especially after fine-tuning consolidates the model around the surviving heads.
+
+**Method spread grows with scale.** At base iterative 50%, methods clustered within 2.8 pp (0.715–0.743). At Medium iterative 50%, the spread is 13.8 pp (Activation 0.720 to Magnitude 0.858). Fine-tuning recovery is not architecture-agnostic: Magnitude benefits far more at scale because weight consolidation (low-magnitude = reliably prunable) is stronger in larger models.
+
+**Random is competitive at 10%** (0.878 ±0.024 ≈ baseline) — consistent with all prior experiments. At low sparsity with recovery steps, any pruning criterion survives.
+
+### Script used
+
+```bash
+python -m experiments.sst2_pruning --model gpt2-medium --task sst2 \
+    --n-seeds 3 --iterative \
+    --max-train-steps 400 --n-train 2000
+```
